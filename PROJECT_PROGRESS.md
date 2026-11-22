@@ -1,4 +1,3 @@
-@'
 # Agent Identity Gateway — Project Progress
 
 ## Project Goal
@@ -20,7 +19,7 @@ Build a security gateway that provides independent identities, delegated access,
 | Phase | Description | Status |
 |---|---|---|
 | 0 | Foundation and architecture | completed|
-| 1 | Human identity and Keycloak | Not started |
+| 1 | Human identity and Keycloak | Implemented and unit-tested. Credentialed integration pending. |
 | 2 | Non-human agent identity | Not started |
 | 3 | Secure token exchange | Not started |
 | 4 | Protected MCP tool server | Not started |
@@ -49,7 +48,7 @@ Build a security gateway that provides independent identities, delegated access,
 
 ## Implementation Log
 
-No application functionality implemented yet.
+Phase 1 implements OIDC code flow with S256 PKCE, an opaque browser session, RS256 JWT validation using Keycloak JWKS, and FastAPI realm-role checks.
 
 ## Verification Log
 
@@ -59,7 +58,10 @@ No application functionality implemented yet.
 | Docker engine | Running |
 | Git repository | Initialized |
 | README.md | 1918 bytes |
-| Automated tests | Not applicable yet |
+| Python 3.12.10 unit suite | 22 passed. One Starlette TestClient/httpx deprecation warning. |
+| Dependency consistency | pip check reported no broken requirements. |
+| Live Keycloak pre-login smoke check | Discovery and RS256 JWKS 200. Gateway login 303. Keycloak login form 200. |
+| Credentialed Keycloak integration | Pending browser sign-in, real code exchange, access-token audience and realm-role verification. |
 
 ## Engineering Decision Log
 
@@ -73,15 +75,12 @@ No application functionality implemented yet.
 
 ## Blockers
 
-None currently identified.
+The remaining Phase 1 checks require a local client secret and interactive sign-in as the configured Keycloak users.
 
 ## Next Steps
 
-1. Complete architecture documentation.
-2. Verify all project files.
-3. Create initial Git commit.
-4. Begin Phase 1: Human Identity and Keycloak.
-'@ | Set-Content PROJECT_PROGRESS.md -Encoding utf8
+1. Configure the local confidential client secret and confirm the client audience and role mappers.
+2. Run the browser verification matrix in README.md and record the actual results before completing Phase 1.
 
 ## Phase 0 Completion Record
 
@@ -96,4 +95,4 @@ Status: Complete
 - Remote: origin/main
 - Working tree verified clean.
 
-Application functionality has not yet been implemented.
+Application functionality was outside the scope of Phase 0.

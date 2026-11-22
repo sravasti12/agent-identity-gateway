@@ -194,3 +194,17 @@ Prompt injection is treated as an untrusted-input and authorization-bypass threa
 This document describes the intended architecture.
 
 Actual protocol support, token claims, Keycloak configuration, MCP authentication behavior, OPA policies, and Z3 invariants must be implemented and independently tested before they are considered complete.
+
+## 8. Phase 1 human authentication
+
+The browser starts at `/auth/login`. FastAPI generates a random state, nonce and PKCE verifier. It stores the verifier and nonce in a five-minute server-side transaction and sets an HttpOnly, SameSite=Lax cookie restricted to the callback path. Keycloak receives the state, nonce and S256 challenge and handles user sign-in.
+
+On callback, FastAPI matches the returned state to the browser cookie and atomically consumes the transaction. It sends the code, original verifier, redirect URI and confidential client credentials to Keycloak's token endpoint. It verifies the ID token's signature, issuer, expiry, client audience and nonce. It checks the access-token hash when present and requires both tokens to identify the same subject. A successful login creates a fresh opaque session cookie and redirects to `/auth/me`. The gateway keeps the access token in memory and discards the ID and refresh tokens after the exchange.
+
+The token verifier reads the `kid` header to select an RSA public signing key from the configured realm's JWKS endpoint. It accepts RS256 and verifies the signature, exact issuer, expiration, API audience and Keycloak access-token type. It extracts identity and realm roles from verified claims. Keys are cached for five minutes, with a refresh attempt on an unknown key subject to a ten-second request cooldown. A provider outage produces 503 when the gateway needs keys and has no usable cached key.
+
+FastAPI revalidates the access token on each protected request. Browser sessions are usable for up to 15 minutes and end earlier when the access token expires. Explicit bearer credentials take precedence over the browser cookie. The role dependencies require exact membership in the named realm role and return 403 when the caller lacks it.
+
+Login transactions and sessions are bounded in-memory stores for a single gateway process. Restarting the gateway clears both, and multiple workers require shared storage. Instant logout, revocation and role changes are outside this phase. Use HTTPS for deployment so cookies carry the Secure flag. HTTP is supported for loopback development. Run without Uvicorn access logging and keep callback query strings out of proxy logs because they contain authorization codes. Authentication responses use no-store and no-referrer headers.
+
+[OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html) · [Keycloak server administration guide](https://www.keycloak.org/docs/latest/server_admin/)

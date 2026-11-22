@@ -1,4 +1,3 @@
-@'
 # Agent Identity Gateway
 
 A security platform for managing authentication, authorization, and lifecycle governance of enterprise AI agents.
@@ -54,4 +53,62 @@ Initially developed as a local security demonstration environment. Production de
 
 Under development. Features will be marked complete only after implementation and verification.
 
-'@ | Set-Content README.md -Encoding utf8
+
+## Phase 1 local setup
+
+Run from the repository root in PowerShell. For a fresh checkout, copy `.env.example` to `.env`. If `.env` already exists, add the missing gateway settings and keep the existing bootstrap values. Set a local Keycloak admin password for a fresh instance and fill in the confidential client secret from the Keycloak admin console. Keep `.env` private.
+
+| Variable | Local value or purpose |
+|---|---|
+| `KEYCLOAK_ISSUER` | `http://localhost:8080/realms/agent-gateway` |
+| `KEYCLOAK_CLIENT_ID` | `agent-gateway-api` |
+| `KEYCLOAK_CLIENT_SECRET` | Secret from the client Credentials tab |
+| `KEYCLOAK_REDIRECT_URI` | `http://localhost:8000/auth/callback` |
+| `KEYCLOAK_API_AUDIENCE` | `agent-gateway-api`, also mapped into access tokens |
+| `KC_BOOTSTRAP_ADMIN_USERNAME`, `KC_BOOTSTRAP_ADMIN_PASSWORD` | Keycloak bootstrap admin credentials for Docker Compose |
+
+```powershell
+py -3.12 -m venv .venv  # If the environment does not exist yet
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+docker compose up -d keycloak
+.venv\Scripts\python.exe -m uvicorn app.gateway.main:app --host 127.0.0.1 --port 8000 --no-access-log
+```
+
+Open the Keycloak admin console at `http://localhost:8080/admin/` and verify the following settings.
+
+1. In realm `agent-gateway`, configure the OpenID Connect client `agent-gateway-api` with client authentication and Standard Flow enabled. Keep Direct Access Grants, Authorization and Standard Token Exchange disabled. Set the exact valid redirect URI above and set the PKCE challenge method to `S256`. Use RS256 signing and standard JWT access tokens.
+2. In the client's dedicated client scope, add an **Audience** protocol mapper with **Included Client Audience** set to `agent-gateway-api` and **Add to access token** enabled. Leave **Add to ID token** off. Keep the realm role mapper that populates `realm_access.roles` and the profile claim mapping for `preferred_username`. If client scope mappings restrict roles, include both application realm roles.
+3. Assign the realm role `hr_manager` to `priya` and `employee` to `rahul` and `ananya`. Set local sign-in credentials in Keycloak as needed.
+
+[Keycloak server administration guide](https://www.keycloak.org/docs/latest/server_admin/)
+
+### Endpoints
+
+| Endpoint | Behavior |
+|---|---|
+| `GET /auth/login` | Starts browser login and redirects to Keycloak |
+| `GET /auth/callback` | Validates the login transaction, exchanges the code, then redirects to `/auth/me` |
+| `GET /auth/me` | Returns verified subject, username and realm roles |
+| `GET /hr/team` | Requires the `hr_manager` realm role |
+| `GET /employee/me` | Requires the `employee` realm role |
+
+The two role-protected routes return the verified caller identity for this phase. Protected routes accept the browser session or an independently obtained API bearer token. Missing or invalid authentication returns 401. A valid caller with insufficient roles receives 403.
+
+### Verification
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+.venv\Scripts\python.exe -m pip check
+```
+
+Python 3.12.10 verification recorded 22 passing tests and one Starlette TestClient/httpx deprecation warning. Dependency checking reported no broken requirements. The automated suite uses generated signing keys and mocked Keycloak endpoints. A live pre-login smoke check returned 200 for realm discovery and JWKS, 303 for the gateway login redirect, and 200 for the Keycloak login form.
+
+To finish Phase 1 verification, first confirm the protected routes return 401 in a fresh browser profile. Then open `http://localhost:8000/auth/login` and sign in separately as each user, using a fresh private session for each account to avoid reusing Keycloak SSO. Use `localhost` consistently for the gateway URLs. Confirm the callback redirects to `/auth/me`, the user and roles match, and the browser receives an opaque session cookie without a token or client secret in the response.
+
+| User | `/auth/me` | `/hr/team` | `/employee/me` |
+|---|---|---|---|
+| priya | 200 | 200 | 403 |
+| rahul | 200 | 403 | 200 |
+| ananya | 200 | 403 | 200 |
+
+Credentialed browser checks are pending. See the architecture document for session, token and deployment constraints.

@@ -11,3 +11,8 @@ htmlcov/
 !.env.example
 .vscode/
 .idea/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
