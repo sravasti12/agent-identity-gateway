@@ -20,7 +20,7 @@ Build a security gateway that provides independent identities, delegated access,
 |---|---|---|
 | 0 | Foundation and architecture | completed|
 | 1 | Human identity and Keycloak | Implemented and unit-tested. Credentialed integration pending. |
-| 2 | Non-human agent identity | Not started |
+| 2 | Non-human agent identity | Python backend implemented and verified |
 | 3 | Secure token exchange | Not started |
 | 4 | Protected MCP tool server | Not started |
 | 5 | OPA authorization | Not started |
@@ -50,6 +50,10 @@ Build a security gateway that provides independent identities, delegated access,
 
 Phase 1 implements OIDC code flow with S256 PKCE, an opaque browser session, RS256 JWT validation using Keycloak JWKS, and FastAPI realm-role checks.
 
+Phase 2 adds a client credentials service for `agent-hr-assistant`, a lock-protected per-process token cache, and bearer-only `GET /agent/me`. The gateway verifies both the caller token and the acquired service token against the existing JWKS, issuer and API audience. The diagnostic checks the configured client, service account username, `hr_agent` realm role and matching subject.
+
+Created `app/identity/agent_tokens.py`, `app/identity/agent_routes.py` and `tests/unit/test_agent_authentication.py`. Updated `config/settings.py`, `app/identity/tokens.py`, `app/gateway/main.py`, `README.md` and this tracker. The existing `.env.example` already documented the two agent credential variables. Phase 2 uses the existing dependencies.
+
 ## Verification Log
 
 | Check | Result |
@@ -62,6 +66,10 @@ Phase 1 implements OIDC code flow with S256 PKCE, an opaque browser session, RS2
 | Dependency consistency | pip check reported no broken requirements. |
 | Live Keycloak pre-login smoke check | Discovery and RS256 JWKS 200. Gateway login 303. Keycloak login form 200. |
 | Credentialed Keycloak integration | Pending browser sign-in, real code exchange, access-token audience and realm-role verification. |
+| Prior manual Phase 2 Keycloak 26.8.2 check | Client credentials grant worked. The observed lifetime was 300 seconds. FastAPI validated the token and both human role routes returned 403. |
+| Phase 2 live backend smoke check | The Python service acquired and reused the Keycloak token. `/agent/me` returned 200. Both human role routes returned 403. |
+| Phase 2 full suite | `.venv\Scripts\python.exe -m pytest -q` reported 46 passed with the existing Starlette TestClient/httpx deprecation warning. |
+| Phase 2 dependency and syntax checks | `pip check` reported no broken requirements. `compileall -q app config tests` succeeded. The repository has no configured lint or type check. |
 
 ## Engineering Decision Log
 
@@ -81,6 +89,7 @@ The remaining Phase 1 checks require a local client secret and interactive sign-
 
 1. Configure the local confidential client secret and confirm the client audience and role mappers.
 2. Run the browser verification matrix in README.md and record the actual results before completing Phase 1.
+3. For broader workload deployment, plan secret rotation and revocation. Each gateway worker currently maintains its own cache and uses short-lived signed tokens that expire without a revocation lookup.
 
 ## Phase 0 Completion Record
 

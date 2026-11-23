@@ -1,6 +1,6 @@
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +12,27 @@ class Settings(BaseSettings):
     keycloak_client_secret: SecretStr
     keycloak_redirect_uri: str
     keycloak_api_audience: str = Field(min_length=1)
+    keycloak_hr_agent_client_id: str | None = None
+    keycloak_hr_agent_client_secret: SecretStr | None = None
+
+    @field_validator("keycloak_hr_agent_client_id")
+    @classmethod
+    def validate_agent_id(cls, value: str | None) -> str | None:
+        if value is not None and (not value or value != value.strip()):
+            raise ValueError("Expected a non-empty agent client ID without surrounding whitespace")
+        return value
+
+    @model_validator(mode="after")
+    def validate_agent_credentials(self) -> "Settings":
+        client_id = self.keycloak_hr_agent_client_id
+        secret = self.keycloak_hr_agent_client_secret
+        if client_id is None and secret is None:
+            return self
+        if client_id is None or secret is None or not secret.get_secret_value().strip():
+            raise ValueError("Configure both HR agent client ID and secret")
+        if client_id == self.keycloak_client_id:
+            raise ValueError("The HR agent requires a separate Keycloak client")
+        return self
 
     @field_validator("keycloak_client_secret")
     @classmethod

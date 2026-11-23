@@ -7,6 +7,8 @@ from fastapi import Depends, FastAPI, Request, Response
 from pydantic import ValidationError
 
 from app.authorization.dependencies import CurrentUser, require_role
+from app.identity.agent_routes import router as agent_router
+from app.identity.agent_tokens import AgentTokenService
 from app.identity.routes import PRIVATE_HEADERS, router
 from app.identity.sessions import LOGIN_TTL, SESSION_TTL, ExpiringStore, LoginAttempt
 from app.identity.tokens import TokenVerifier, User
@@ -21,17 +23,22 @@ def create_app(
         try:
             app.state.settings = settings if settings is not None else Settings()
         except ValidationError as error:
-            fields = ", ".join(str(issue["loc"][0]) for issue in error.errors())
+            fields = ", ".join(
+                str(issue["loc"][0]) if issue["loc"] else "HR agent credentials"
+                for issue in error.errors(include_input=False)
+            )
             raise RuntimeError(f"Missing or invalid gateway configuration: {fields}") from None
         app.state.login_attempts = ExpiringStore[LoginAttempt](LOGIN_TTL)
         app.state.sessions = ExpiringStore[str](SESSION_TTL)
         with httpx.Client(timeout=5.0, transport=transport, trust_env=False) as http:
             app.state.http = http
             app.state.verifier = TokenVerifier(app.state.settings, http)
+            app.state.agent_tokens = AgentTokenService(app.state.settings, http, app.state.verifier)
             yield
 
     app = FastAPI(title="Agent Identity Gateway", lifespan=lifespan)
     app.include_router(router)
+    app.include_router(agent_router)
 
     @app.middleware("http")
     async def private_responses(

@@ -112,3 +112,22 @@ To finish Phase 1 verification, first confirm the protected routes return 401 in
 | ananya | 200 | 403 | 200 |
 
 Credentialed browser checks are pending. See the architecture document for session, token and deployment constraints.
+
+## Phase 2 workload authentication
+
+The HR assistant uses the Keycloak client credentials grant. Configure these settings in the ignored local `.env`.
+
+| Variable | Local value or purpose |
+|---|---|
+| `KEYCLOAK_ISSUER` | `http://localhost:8080/realms/agent-gateway` |
+| `KEYCLOAK_HR_AGENT_CLIENT_ID` | `agent-hr-assistant` |
+| `KEYCLOAK_HR_AGENT_CLIENT_SECRET` | Confidential client secret from Keycloak |
+| `KEYCLOAK_API_AUDIENCE` | `agent-gateway-api` |
+
+Set both HR agent credentials to enable workload authentication. Omit both to run only the human login flow. In Keycloak, the agent client needs client authentication and service accounts enabled, the `hr_agent` realm role assigned and in scope, and the API audience mapped into its access token. Keep the `preferred_username` claim for the service account. [Keycloak service account setup](https://www.keycloak.org/docs/26.8.0/server_admin/#_service_accounts)
+
+`GET /agent/me` requires a valid bearer token for the configured HR service account. The gateway verifies the signature, issuer, expiry and API audience using the same JWKS verifier as the human routes. It then checks the signed client ID (`azp`), service account username and realm role. The gateway acquires or reuses its own verified service token and confirms both tokens identify the same subject. The response contains the subject, username and realm roles. Missing or invalid bearer credentials return 401. A verified token for a different identity returns 403. Provider unavailability returns 503, and a rejected workload exchange or invalid provider token response returns 502.
+
+The gateway keeps one verified workload token per process. The cache uses the earlier of `expires_in` from the start of the exchange and the signed JWT expiration, with a one-hour upper bound. Requests refresh under a lock when 10% of the usable lifetime remains, up to 30 seconds early. If refresh fails, the error is returned. The next request can retry. Restarts clear the cache, each worker manages its own cache, and the gateway does not perform immediate revocation checks or automatic secret rotation.
+
+The live Keycloak 26.8.2 setup had already been verified manually with a 300-second token lifetime. The backend smoke check then acquired and reused a real service token, returned 200 from `/agent/me`, and returned 403 from both human role routes. The full unit suite reported 46 passed with one existing TestClient/httpx deprecation warning. Run `.venv\Scripts\python.exe -m pytest -q` to repeat the mocked tests. See [the progress tracker](PROJECT_PROGRESS.md) for the implementation record.
