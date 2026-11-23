@@ -1,19 +1,26 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from secrets import token_urlsafe
 from threading import Lock
 from time import monotonic
-
 
 LOGIN_COOKIE = "gateway_login"
 SESSION_COOKIE = "gateway_session"
 LOGIN_TTL = 300
 SESSION_TTL = 900
+HANDOFF_TTL = 120
 
 
 @dataclass(frozen=True)
 class LoginAttempt:
     verifier: str
     nonce: str
+    delegate: bool = False
+
+
+@dataclass
+class BrowserSession:
+    token: str = field(repr=False)
+    handoff: str | None = field(default=None, repr=False)
 
 
 class ExpiringStore[T]:

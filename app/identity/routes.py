@@ -1,13 +1,22 @@
 import base64
 import hashlib
 from secrets import compare_digest, token_urlsafe
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from app.identity.sessions import LOGIN_COOKIE, LOGIN_TTL, SESSION_COOKIE, SESSION_TTL, LoginAttempt
+from app.identity.delegation import TOOL_SCOPE, DelegationDenied, delegation_scope
+from app.identity.sessions import (
+    HANDOFF_TTL,
+    LOGIN_COOKIE,
+    LOGIN_TTL,
+    SESSION_COOKIE,
+    SESSION_TTL,
+    BrowserSession,
+    LoginAttempt,
+)
 from app.identity.tokens import InvalidToken, KeycloakUnavailable
 
 router = APIRouter(prefix="/auth")
@@ -16,10 +25,15 @@ PRIVATE_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"
 
 
 @router.get("/login")
-def login(request: Request) -> Response:
+def login(request: Request, delegate: bool = False) -> Response:
     app = request.app.state
     settings = app.settings
-    attempt = LoginAttempt(verifier=token_urlsafe(48), nonce=token_urlsafe(32))
+    scopes = "openid profile"
+    if delegate:
+        if not settings.delegation_enabled:
+            return JSONResponse({"detail": "Delegation unavailable"}, 404)
+        scopes += f" {TOOL_SCOPE} {delegation_scope(settings.keycloak_hr_agent_client_id)}"
+    attempt = LoginAttempt(verifier=token_urlsafe(48), nonce=token_urlsafe(32), delegate=delegate)
     state = app.login_attempts.add(attempt)
     digest = hashlib.sha256(attempt.verifier.encode("ascii")).digest()
     challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
@@ -28,7 +42,7 @@ def login(request: Request) -> Response:
             "response_type": "code",
             "client_id": settings.keycloak_client_id,
             "redirect_uri": settings.keycloak_redirect_uri,
-            "scope": "openid profile",
+            "scope": scopes,
             "state": state,
             "nonce": attempt.nonce,
             "code_challenge": challenge,
@@ -66,6 +80,7 @@ def callback(request: Request) -> Response:
 
     codes = query.getlist("code")
     issuers = query.getlist("iss")
+    response: Response
     if "error" in query or len(codes) != 1 or not codes[0] or (
         issuers and issuers != [settings.keycloak_issuer]
     ):
@@ -77,6 +92,31 @@ def callback(request: Request) -> Response:
         httponly=True, samesite="lax",
     )
     return response
+
+
+@router.post("/delegation")
+def delegation_handoff(request: Request) -> Response:
+    app = request.app.state
+    if not app.settings.delegation_enabled:
+        return JSONResponse({"detail": "Delegation unavailable"}, 404)
+    redirect = urlsplit(app.settings.keycloak_redirect_uri)
+    if request.headers.get("Origin") != f"{redirect.scheme}://{redirect.netloc}":
+        return JSONResponse({"detail": "Origin not permitted"}, 403)
+    handle = request.cookies.get(SESSION_COOKIE, "")
+    session = app.sessions.get(handle)
+    if session is None:
+        return JSONResponse({"detail": "Browser session required"}, 401)
+    if session.handoff is None or app.handoffs.get(session.handoff) != handle:
+        return JSONResponse({"detail": "No active delegation handoff"}, 403)
+    try:
+        app.delegation.verify_subject(session.token)
+    except InvalidToken:
+        return JSONResponse({"detail": "Browser session expired"}, 401)
+    except DelegationDenied:
+        return JSONResponse({"detail": "Delegation denied"}, 403)
+    except KeycloakUnavailable:
+        return JSONResponse({"detail": "Identity provider unavailable"}, 503)
+    return JSONResponse({"handoff": session.handoff, "expires_within_seconds": HANDOFF_TTL})
 
 
 def complete_login(request: Request, code: str, attempt: LoginAttempt) -> Response:
@@ -127,6 +167,10 @@ def complete_login(request: Request, code: str, attempt: LoginAttempt) -> Respon
                 raise InvalidToken
         if app.verifier.access_user(access_token).subject != claims["sub"]:
             raise InvalidToken
+        if attempt.delegate:
+            app.delegation.verify_subject(access_token)
+    except DelegationDenied:
+        return JSONResponse({"detail": "Delegation denied"}, 403, headers=PRIVATE_HEADERS)
     except (httpx.HTTPError, KeycloakUnavailable):
         return JSONResponse(
             {"detail": "Identity provider unavailable"}, 503, headers=PRIVATE_HEADERS,
@@ -137,7 +181,10 @@ def complete_login(request: Request, code: str, attempt: LoginAttempt) -> Respon
     previous = request.cookies.get(SESSION_COOKIE)
     if previous:
         app.sessions.get(previous, consume=True)
-    handle = app.sessions.add(access_token)
+    session = BrowserSession(access_token)
+    handle = app.sessions.add(session)
+    if attempt.delegate:
+        session.handoff = app.handoffs.add(handle)
     response = RedirectResponse("/auth/me", status_code=303, headers=PRIVATE_HEADERS)
     response.set_cookie(
         SESSION_COOKIE, handle, max_age=SESSION_TTL, secure=settings.secure_cookies,

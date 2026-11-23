@@ -91,22 +91,26 @@ class TokenVerifier:
             raise InvalidToken from None
 
     def access_user(self, token: str) -> User:
-        user, _ = self._access_identity(token)
+        user, claims = self.access_identity(token)
+        if "act" in claims:
+            raise InvalidToken
         return user
 
     def access_agent(self, token: str, client_id: str) -> tuple[User, int]:
-        user, claims = self._access_identity(token)
+        user, claims = self.access_identity(token)
         if type(claims["exp"]) is not int:
             raise InvalidToken
         if (
             claims.get("azp") != client_id
+            or "act" in claims
+            or "may_act" in claims
             or user.username != f"service-account-{client_id}"
             or "hr_agent" not in user.realm_roles
         ):
             raise WrongAgentIdentity
         return user, claims["exp"]
 
-    def _access_identity(self, token: str) -> tuple[User, dict[str, Any]]:
+    def access_identity(self, token: str) -> tuple[User, dict[str, Any]]:
         claims = self.decode(token, self.settings.keycloak_api_audience, ["preferred_username"])
         realm = claims.get("realm_access", {})
         roles = realm.get("roles", []) if isinstance(realm, dict) else None

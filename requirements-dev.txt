@@ -1,2 +1,5 @@
 -r requirements.txt
 pytest>=8.3,<10
+z3-solver>=4.13,<5
+ruff>=0.17,<1
+mypy>=2.4,<3

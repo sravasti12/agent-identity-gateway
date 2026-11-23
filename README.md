@@ -131,3 +131,35 @@ Set both HR agent credentials to enable workload authentication. Omit both to ru
 The gateway keeps one verified workload token per process. The cache uses the earlier of `expires_in` from the start of the exchange and the signed JWT expiration, with a one-hour upper bound. Requests refresh under a lock when 10% of the usable lifetime remains, up to 30 seconds early. If refresh fails, the error is returned. The next request can retry. Restarts clear the cache, each worker manages its own cache, and the gateway does not perform immediate revocation checks or automatic secret rotation.
 
 The live Keycloak 26.8.2 setup had already been verified manually with a 300-second token lifetime. The backend smoke check then acquired and reused a real service token, returned 200 from `/agent/me`, and returned 403 from both human role routes. The full unit suite reported 46 passed with one existing TestClient/httpx deprecation warning. Run `.venv\Scripts\python.exe -m pytest -q` to repeat the mocked tests. See [the progress tracker](PROJECT_PROGRESS.md) for the implementation record.
+
+## Phase 3 Stage 1 recovery verification
+
+On the isolated Keycloak 26.8.2 recovery instance at `http://localhost:8081`, both built-in delegation scopes passed readback in the `agent-gateway` realm.
+
+| Scope | Generated scope ID | Verified protocol mapper providers |
+|---|---|---|
+| `delegation:user` | `ea200624-3bcc-4129-9901-bcd8e43e5298` | `oidc-parameterized-scope-user-property-mapper` |
+| `delegation:client` | `4d50e0f0-557f-4dee-aef9-44bd76e45442` | `oidc-parameterized-scope-client-sub-mapper`, `oidc-parameterized-scope-mapper`, `oidc-parameterized-scope-audience-mapper` |
+
+Windows PowerShell 5.1 wrapped the JSON array emitted by the original helper in a second array, so the check counted one outer element. Assigning `ConvertFrom-Json -InputObject $response.Content` directly before counting verified one user mapper and three client mappers. Both scope representations and all four mapper configurations matched the 26.8.2 baseline before and after registration. [Keycloak 26.8.2 built-in scope definitions](https://github.com/keycloak/keycloak/blob/26.8.2/services/src/main/java/org/keycloak/protocol/oidc/OIDCLoginProtocolFactory.java#L627-L667)
+
+Authenticated PowerShell Admin REST calls under `/admin/realms/agent-gateway` returned 204 for both `PUT /default-optional-client-scopes/{id}` operations. `GET /default-optional-client-scopes`, `GET /client-scopes/{id}`, `GET /client-scopes/{id}/protocol-mappers/models`, and the final `GET /client-scopes` returned 200 and passed verification. Before-and-after reads confirmed both existing clients kept their default and optional scope assignments. Consent settings and FGAP V2 permissions were untouched.
+
+Stage 1 is complete on the recovery instance. See the [progress tracker](PROJECT_PROGRESS.md) for the final inventory and the Stage 2A verification status.
+
+## Phase 3 delegation and protected MCP tool
+
+Delegation is off by default. The opt-in switch is `DELEGATION_ENABLED`. The existing `KEYCLOAK_ISSUER`, `KEYCLOAK_API_AUDIENCE`, and human and HR agent client credentials are used. There are no new secrets. For approved recovery integration, use `http://localhost:8081/realms/agent-gateway` as the issuer and keep the credentials in the ignored local `.env`.
+
+1. The human starts at `GET /auth/login?delegate=true`. The existing OIDC PKCE flow asks for `hr_team_read` and `delegation:client:<agent-client-id>`. The callback checks signed subject claims, the actor client and service-account subject in `may_act`, and the granted scopes. After consent, a same-origin browser `POST /auth/delegation` returns an opaque handoff valid for at most two minutes.
+2. The workload calls `read_hr_team` over stateless MCP Streamable HTTP at `/mcp`. It supplies the handoff as the tool argument and its own service-account access token as the HTTP bearer. The gateway verifies that bearer and checks the signed subject-to-actor relationship and the human's HR role before atomically consuming the handoff.
+3. The gateway authenticates to Keycloak as the agent client and sends both signed tokens to the 26.8.2 delegation exchange. The request specifies the API audience and only `hr_team_read`. The gateway verifies the returned JWT, checks that `sub` and `act` match the validated subject and actor, and requires the single API audience. It rejects extra privileges, missing scopes, a refresh token, and expiry beyond either input token or five minutes.
+4. The in-process policy requires `hr_manager`, `hr_agent`, and `hr_team_read` before permitting the tool. The tool returns verified identity metadata for this demonstration. No HR data source is connected. Subject and delegated JWTs stay server-side. The gateway does not retain exchanged JWTs after the operation. [Keycloak 26.8.2 delegation](https://github.com/keycloak/keycloak/blob/26.8.2/docs/guides/securing-apps/token-exchange.adoc) · [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
+
+Handoffs are single-use in one gateway process, including when the provider fails after consumption. New sign-in invalidates the previous browser session's handoff. This protects the application handoff from replay. The agent access token is still a bearer credential and needs secure transport and storage. The MCP endpoint checks Host and Origin against the configured browser callback origin. The current policy is local Python. OPA and production tool integrations remain future work.
+
+### Phase 3 acceptance
+
+The automated suite reported 89 passed and one pre-existing Starlette TestClient/httpx deprecation warning. Mocked tests exercised browser consent claims, provider failures, audience and expiry rejection, actor and subject binding, MCP authorization, and handoff replay. Z3 tests checked that the modeled successful decision has a witness and that audience, scope, actor, subject, expiry and privilege violations are unsatisfiable. The model treats verified claims and policy inputs as assumptions and does not verify the Keycloak implementation or the deployment.
+
+Phase 3 remains open. The complete Stage 2A after-state was unavailable. Recovery-only acceptance still requires an approved readback of the client and FGAP representations, confirmation that both clients can request the explicit `hr_team_read` scope, and separate approval for live tests. Those tests must verify consented access and denial without consent or permission, both token identities, exact API audience, narrowed scopes and expiry, ordinary login regression, and successful and denied MCP calls.

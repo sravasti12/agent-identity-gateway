@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     keycloak_api_audience: str = Field(min_length=1)
     keycloak_hr_agent_client_id: str | None = None
     keycloak_hr_agent_client_secret: SecretStr | None = None
+    delegation_enabled: bool = False
 
     @field_validator("keycloak_hr_agent_client_id")
     @classmethod
@@ -27,11 +28,17 @@ class Settings(BaseSettings):
         client_id = self.keycloak_hr_agent_client_id
         secret = self.keycloak_hr_agent_client_secret
         if client_id is None and secret is None:
+            if self.delegation_enabled:
+                raise ValueError("Delegation requires HR agent credentials")
             return self
         if client_id is None or secret is None or not secret.get_secret_value().strip():
             raise ValueError("Configure both HR agent client ID and secret")
         if client_id == self.keycloak_client_id:
             raise ValueError("The HR agent requires a separate Keycloak client")
+        if self.delegation_enabled and not client_id.isascii():
+            raise ValueError("Delegation requires an ASCII agent client ID")
+        if self.delegation_enabled and any(char.isspace() or char == ":" for char in client_id):
+            raise ValueError("Delegation requires an unambiguous client ID scope parameter")
         return self
 
     @field_validator("keycloak_client_secret")

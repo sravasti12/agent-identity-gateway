@@ -11,7 +11,8 @@ def authenticated_user(request: Request) -> User:
     app = request.app.state
     authorization = request.headers.get("Authorization")
     if authorization is None:
-        token = app.sessions.get(request.cookies.get(SESSION_COOKIE, ""))
+        session = app.sessions.get(request.cookies.get(SESSION_COOKIE, ""))
+        token = session.token if session is not None else None
     else:
         scheme, _, credentials = authorization.partition(" ")
         token = credentials if scheme.lower() == "bearer" else None
