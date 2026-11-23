@@ -8,6 +8,12 @@ valid_input := {
     "actor": {"subject": "example-workload", "roles": ["hr_agent"], "client_id": "example-client"},
     "delegation": {"audience": "example-api", "expires_at": 200, "scopes": ["hr_team_read", "profile"]},
     "request": {"tool": "read_hr_team", "resource": {"type": "hr_team", "id": "demo-team"}},
+    "governance": {
+        "status": "ACTIVE",
+        "client_id": "example-client",
+        "assigned": authorization.registry_catalog,
+        "approved": authorization.registry_catalog,
+    },
     "context": {"expected_audience": "example-api", "allowed_agent_client": "example-client"},
 }
 
@@ -29,6 +35,13 @@ test_deny_invalid_authorization_input[name] if {
         "extra_scope": {"op": "add", "path": "/delegation/scopes/-", "value": "hr_team_write"},
         "expiry": {"op": "replace", "path": "/delegation/expires_at", "value": 100},
         "expiry_type": {"op": "replace", "path": "/delegation/expires_at", "value": "200"},
+        "pending_agent": {"op": "replace", "path": "/governance/status", "value": "PENDING"},
+        "suspended_agent": {"op": "replace", "path": "/governance/status", "value": "SUSPENDED"},
+        "deprovisioned_agent": {"op": "replace", "path": "/governance/status", "value": "DEPROVISIONED"},
+        "unbound_registry": {"op": "replace", "path": "/governance/client_id", "value": "other-client"},
+        "assignment_drift": {"op": "add", "path": "/governance/assigned/scopes/-", "value": "hr_team_write"},
+        "unapproved_resource": {"op": "replace", "path": "/governance/approved/resources", "value": []},
+        "unknown_registry": {"op": "remove", "path": "/governance"},
     }
     invalid_input := json.patch(valid_input, [change])
     authorization.decision == {"allow": false} with input as invalid_input with time.now_ns as 100000000000

@@ -4,6 +4,7 @@ from time import time
 import httpx
 
 from app.identity.delegation import DelegatedIdentity
+from app.identity.lifecycle_models import Agent
 from config.settings import Settings
 
 DECISION_PATH = "/v1/data/agent_gateway/authorization/decision"
@@ -30,7 +31,7 @@ class OPAAuthorizer:
         self.http = http
         self.settings = settings
 
-    def authorize_team_read(self, identity: DelegatedIdentity) -> None:
+    def authorize_team_read(self, identity: DelegatedIdentity, agent: Agent) -> None:
         if time() >= identity.expires_at:
             raise PolicyDenied
         # Identity has already passed JWT, subject and actor binding checks.
@@ -47,6 +48,12 @@ class OPAAuthorizer:
                 "scopes": sorted(identity.granted_scopes),
             },
             "request": {"tool": "read_hr_team", "resource": {"type": "hr_team", "id": "demo-team"}},
+            "governance": {
+                "status": agent.status.value,
+                "client_id": agent.client_id,
+                "assigned": {key: sorted(value) for key, value in agent.assigned.model_dump().items()},
+                "approved": {key: sorted(value) for key, value in agent.approved.model_dump().items()},
+            },
             "context": {
                 "expected_audience": self.settings.keycloak_api_audience,
                 "allowed_agent_client": self.settings.keycloak_hr_agent_client_id,

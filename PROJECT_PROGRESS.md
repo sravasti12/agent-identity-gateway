@@ -23,7 +23,7 @@ Build a security gateway that provides independent identities, delegated access,
 | 2 | Non-human agent identity | Python backend implemented and verified |
 | 3 | Secure token exchange | Backend implemented and mock-tested. Stage 2A full readback and live exchange pending. |
 | 4 | Centralized authorization with OPA and Rego | Implemented and tested with real OPA and mocked Keycloak. Live acceptance pending. |
-| 5 | OPA authorization | Not started |
+| 5 | Audit logging and non-human identity lifecycle | Implemented and locally verified. Operational acceptance pending. |
 | 6 | Audit and lifecycle automation | Not started |
 | 7 | Security testing and Z3 | Not started |
 | 8 | Finalization and demonstration | Not started |
@@ -160,7 +160,25 @@ Added `compose.opa.yml`, `policies/authorization.rego`, `policies/api_authorizat
 
 The symbolic model now requires the exact tool and resource, a valid decision response, and explicit policy allow. These are abstract inputs. Real Rego execution is covered separately and live Keycloak behavior remains outside both checks.
 
-Phase 4 acceptance has evidence for policy rules, fail-closed handling, MCP integration with real OPA, and the OPA-only Compose service. Deployment acceptance still requires an approved recovery-only sign-in, exchange, and MCP allow/deny run. The tool still covers one logical resource. Loopback OPA protects the management API with a path policy and relies on the host trust boundary for local decision-query access. Phase 5 has not begun.
+Phase 4 acceptance has evidence for policy rules, fail-closed handling, MCP integration with real OPA, and the OPA-only Compose service. Deployment acceptance still requires an approved recovery-only sign-in, exchange, and MCP allow/deny run. The tool still covers one logical resource. Loopback OPA protects the management API with a path policy and relies on the host trust boundary for local decision-query access.
+
+## Phase 5 registry, lifecycle and audit
+
+SQLite persists the agent registry, review decisions, credential version metadata, and a chained audit. Onboarding defaults to empty grants and `PENDING`. A verified human with `gateway_admin` can activate, suspend, reactivate, deprovision, request credential rotation, and approve or reject changes to local permissions. Deprovisioning is terminal, clears assigned grants, revokes credential metadata locally, and leaves external revocation pending. The provider interface covers rotation, disablement, and permission observations. This phase used mocks and leaves the live adapter unconfigured.
+
+Registry generation checks block revoked handoffs and a second check protects the decision-to-tool boundary. Rego requires an active, approved agent and preserves earlier identity and scope rules. The Z3 abstraction checks active status, generation matching, permission subsets and the human administrator boundary. It does not prove live issuer behavior or persistence integrity.
+
+New files are `app/audit/store.py`, `app/audit/verify.py`, `app/identity/lifecycle.py`, `app/identity/lifecycle_models.py`, `app/identity/lifecycle_routes.py`, and `tests/unit/test_lifecycle.py`. Updated the gateway, existing identity and authorization routes, delegation session and tool integration, OPA policies, Z3 model, related tests, settings, environment example, ignore rules, and these project documents. No dependency or Keycloak configuration changes were made.
+
+| Check | Actual result |
+|---|---|
+| `.venv\Scripts\python.exe -m pytest -q` with `OPA_TEST_BINARY` set to OPA 1.12.2 | 172 passed, one existing TestClient/httpx deprecation warning. Real OPA ran with mocked Keycloak. |
+| `opa check --strict policies/` and `opa test policies/ -v` | Passed, including 22 of 22 Rego cases. |
+| Ruff on changed Python files | Passed. Full-tree Ruff found the existing import-order issue in `app/identity/agent_tokens.py`. |
+| Mypy across app, config and verification | Passed across 17 source files. |
+| Compile checks, `pip check`, and `git diff --check` | Passed. |
+
+Local acceptance covers registry durability, verified human administration, lifecycle revocation before MCP execution, mock provider workflows, review decisions, audit pagination, and detection of modified, deleted or reordered records. The offline verifier opens an existing database read-only. Operational acceptance remains open for controlled administrator-role configuration, deployment storage and audit retention, and any separately approved live provider operations and recovery acceptance. No production rotation or revocation was attempted. Phase 6 remains untouched.
 
 ## Engineering Decision Log
 

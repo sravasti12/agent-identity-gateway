@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from time import time
 
 import httpx
@@ -12,6 +13,7 @@ from app.authorization.delegated import (
     PolicyUnavailable,
 )
 from app.identity.delegation import DelegatedIdentity
+from app.identity.lifecycle_models import HR_GRANTS, Agent, Credential, State
 from app.identity.tokens import User
 from config.settings import Settings
 
@@ -41,7 +43,19 @@ def identity() -> DelegatedIdentity:
     )
 
 
-def test_posts_only_verified_identity_and_server_context(settings, identity):
+@pytest.fixture
+def agent() -> Agent:
+    now = datetime.now(UTC)
+    return Agent(
+        id="example-agent", client_id="example-client", display_name="Example", description="",
+        status=State.ACTIVE, assigned=HR_GRANTS, approved=HR_GRANTS, created_by="fixture-admin",
+        created_at=now, updated_at=now, credential=Credential(version="metadata-version", created_at=now),
+    )
+
+
+def test_posts_only_verified_identity_and_server_context(settings, identity, agent):
+    grants = {"roles": ["hr_agent"], "tools": ["read_hr_team"], "resources": ["hr_team/demo-team"],
+              "scopes": ["hr_team_read"]}
     def respond(request):
         assert str(request.url) == f"https://opa.test{DECISION_PATH}"
         assert "authorization" not in request.headers
@@ -52,11 +66,12 @@ def test_posts_only_verified_identity_and_server_context(settings, identity):
             "delegation": {"audience": "example-api", "expires_at": identity.expires_at, "scopes": ["hr_team_read"]},
             "request": {"tool": "read_hr_team", "resource": {"type": "hr_team", "id": "demo-team"}},
             "context": {"expected_audience": "example-api", "allowed_agent_client": "example-client"},
+            "governance": {"status": "ACTIVE", "client_id": "example-client", "assigned": grants, "approved": grants},
         }}
         return httpx.Response(200, json={"result": {"allow": True}})
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
-        OPAAuthorizer(client, settings).authorize_team_read(identity)
+        OPAAuthorizer(client, settings).authorize_team_read(identity, agent)
 
 
 @pytest.mark.parametrize(("status", "body"), [
@@ -74,7 +89,7 @@ def test_posts_only_verified_identity_and_server_context(settings, identity):
     (302, b'{"result":{"allow":true}}'),
     (503, b'{"result":{"allow":true}}'),
 ])
-def test_opa_response_fails_closed(settings, identity, status, body):
+def test_opa_response_fails_closed(settings, identity, agent, status, body):
     def respond(request):
         assert request.url.host == "opa.test"
         return httpx.Response(status, content=body, headers={"Location": "https://unrelated.test/"})
@@ -83,33 +98,33 @@ def test_opa_response_fails_closed(settings, identity, status, body):
         httpx.Client(transport=httpx.MockTransport(respond), follow_redirects=True) as client,
         pytest.raises(PolicyUnavailable),
     ):
-        OPAAuthorizer(client, settings).authorize_team_read(identity)
+        OPAAuthorizer(client, settings).authorize_team_read(identity, agent)
 
 
 @pytest.mark.parametrize("transport_error", [httpx.ReadTimeout, httpx.ConnectError])
-def test_opa_network_failure_has_sanitized_error(settings, identity, transport_error):
+def test_opa_network_failure_has_sanitized_error(settings, identity, agent, transport_error):
     def respond(request):
         raise transport_error("private diagnostic", request=request)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client, pytest.raises(PolicyUnavailable) as caught:
-        OPAAuthorizer(client, settings).authorize_team_read(identity)
+        OPAAuthorizer(client, settings).authorize_team_read(identity, agent)
     assert "private diagnostic" not in str(caught.value)
 
 
-def test_valid_opa_denial_raises_policy_denied(settings, identity):
+def test_valid_opa_denial_raises_policy_denied(settings, identity, agent):
     with httpx.Client(transport=httpx.MockTransport(
         lambda _: httpx.Response(200, json={"result": {"allow": False}}),
     )) as client, pytest.raises(PolicyDenied):
-        OPAAuthorizer(client, settings).authorize_team_read(identity)
+        OPAAuthorizer(client, settings).authorize_team_read(identity, agent)
 
 
-def test_never_uses_allow_returned_after_expiration(settings, identity, monkeypatch):
+def test_never_uses_allow_returned_after_expiration(settings, identity, agent, monkeypatch):
     clock = iter([identity.expires_at - 1, identity.expires_at])
     monkeypatch.setattr("app.authorization.delegated.time", lambda: next(clock))
     with httpx.Client(transport=httpx.MockTransport(
         lambda _: httpx.Response(200, json={"result": {"allow": True}}),
     )) as client, pytest.raises(PolicyDenied):
-        OPAAuthorizer(client, settings).authorize_team_read(identity)
+        OPAAuthorizer(client, settings).authorize_team_read(identity, agent)
 
 
 @pytest.mark.parametrize("url", ["http://opa.test", "https://user:credential@opa.test", "https://opa.test/a"])

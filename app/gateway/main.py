@@ -1,18 +1,25 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from typing import Annotated
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import httpx
 from fastapi import Depends, FastAPI, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import ValidationError
 
+from app.audit.store import Database
 from app.authorization.delegated import OPAAuthorizer
 from app.authorization.dependencies import CurrentUser, require_role
 from app.identity.agent_routes import router as agent_router
 from app.identity.agent_tokens import AgentTokenService
 from app.identity.delegation import DelegationService
+from app.identity.lifecycle import AgentProvider, Lifecycle, LifecycleError
+from app.identity.lifecycle_routes import router as lifecycle_router
 from app.identity.routes import PRIVATE_HEADERS, router
 from app.identity.sessions import (
     HANDOFF_TTL,
@@ -30,6 +37,7 @@ from config.settings import Settings
 def create_app(
     settings: Settings | None = None, *, transport: httpx.BaseTransport | None = None,
     opa_transport: httpx.BaseTransport | None = None,
+    agent_provider: AgentProvider | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -51,10 +59,13 @@ def create_app(
         app.state.sessions = ExpiringStore[BrowserSession](SESSION_TTL)
         app.state.handoffs = ExpiringStore[str](HANDOFF_TTL)
         with (
+            closing(Database(app.state.settings.gateway_database)) as storage,
             httpx.Client(timeout=5.0, transport=transport, trust_env=False) as http,
             httpx.Client(timeout=2.0, transport=opa_transport, trust_env=False) as opa_http,
         ):
             app.state.http = http
+            app.state.storage = storage
+            app.state.lifecycle = Lifecycle(storage, app.state.settings.access_review_days, agent_provider)
             app.state.verifier = TokenVerifier(app.state.settings, http)
             app.state.agent_tokens = AgentTokenService(app.state.settings, http, app.state.verifier)
             app.state.delegation = DelegationService(app.state.settings, http, app.state.verifier)
@@ -65,13 +76,26 @@ def create_app(
     app = FastAPI(title="Agent Identity Gateway", lifespan=lifespan)
     app.include_router(router)
     app.include_router(agent_router)
+    app.include_router(lifecycle_router)
+
+    @app.exception_handler(LifecycleError)
+    async def lifecycle_error(_request: Request, error: LifecycleError) -> Response:
+        return JSONResponse({"detail": error.code}, error.status)
+
+    @app.exception_handler(RequestValidationError)
+    async def private_validation(request: Request, error: RequestValidationError) -> Response:
+        if request.url.path.startswith("/admin/"):
+            return JSONResponse({"detail": "invalid_governance_request"}, 422)
+        return await request_validation_exception_handler(request, error)
 
     @app.middleware("http")
     async def private_responses(
         request: Request, call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
+        request.state.correlation_id = uuid4().hex
         response = await call_next(request)
         response.headers.update(PRIVATE_HEADERS)
+        response.headers["X-Correlation-ID"] = request.state.correlation_id
         return response
 
     @app.get("/auth/me")

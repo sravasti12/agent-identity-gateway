@@ -35,6 +35,7 @@ def settings(monkeypatch):
     monkeypatch.setenv("KEYCLOAK_HR_AGENT_CLIENT_SECRET", FIXTURE_SECRET)
     return Settings(
         _env_file=None,
+        gateway_database=":memory:",
         keycloak_issuer="https://keycloak.test/realms/test",
         keycloak_api_audience="test-api",
         keycloak_client_id="human-client",

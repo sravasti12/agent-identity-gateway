@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     keycloak_hr_agent_client_secret: SecretStr | None = None
     delegation_enabled: bool = False
     opa_url: str = "http://127.0.0.1:8181"
+    gateway_database: str = Field(default="gateway-state.sqlite3", min_length=1)
+    access_review_days: int = Field(default=30, ge=1, le=3650)
 
     @field_validator("opa_url")
     @classmethod

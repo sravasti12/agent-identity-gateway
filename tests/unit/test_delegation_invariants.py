@@ -33,9 +33,27 @@ def test_authorized_delegation_has_a_witness():
     lambda m: z3.Not(m.resource_is_demo_team),
     lambda m: z3.Not(m.policy_response_valid),
     lambda m: z3.Not(m.policy_allows),
+    lambda m: m.agent_status == m.agent_suspended,
+    lambda m: m.agent_status == m.agent_deprovisioned,
+    lambda m: m.agent_status == 0,
+    lambda m: m.handoff_generation < m.registry_generation,
+    lambda m: m.registry_assigned & ~m.registry_approved != 0,
+    lambda m: m.delegated_permissions & ~m.registry_approved != 0,
 ])
 def test_delegation_invariants(violation):
     model = DelegationModel()
     solver = z3.Solver()
     solver.add(model.allowed(), violation(model))
+    assert solver.check() == z3.unsat
+
+
+@pytest.mark.parametrize("violation", [
+    lambda m: m.administrator_is_agent,
+    lambda m: z3.Not(m.administrator_verified_human),
+    lambda m: z3.Not(m.administrator_has_role),
+])
+def test_lifecycle_admin_requires_authorized_human(violation):
+    model = DelegationModel()
+    solver = z3.Solver()
+    solver.add(model.administrative_change_allowed(), violation(model))
     assert solver.check() == z3.unsat

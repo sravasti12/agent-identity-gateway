@@ -203,3 +203,43 @@ Remove-Item Env:OPA_TEST_BINARY
 The Python unit tests mock OPA responses to validate transport and fail-closed behavior. Rego tests evaluate the policy independently. With `OPA_TEST_BINARY` set, pytest starts an isolated OPA process on an ephemeral loopback port and exercises MCP with real Rego decisions and mocked Keycloak. This run recorded **143 Python tests passed** with one existing TestClient/httpx warning and **15 Rego cases passed**. A disposable OPA-only Compose run confirmed HTTP 200 health, a default-deny response, and HTTP 401 from the management endpoint. The disposable container and network were removed afterward.
 
 The Z3 model checks an abstract decision with a permitted tool and resource, valid explicit OPA allow, and the existing identity and scope conditions. It does not prove Rego–Python equivalence, policy integrity, or live issuer behavior. The tool still returns verified metadata for one demonstration resource. Live recovery acceptance remains pending separate approval.
+
+## Phase 5 agent governance and audit
+
+The gateway stores agent identities, access reviews, credential metadata, and audit events in SQLite. Set `GATEWAY_DATABASE` to an application-owned database path, or use the default `gateway-state.sqlite3`. `ACCESS_REVIEW_DAYS` defaults to 30. The registry never requires client secrets. Its credential version IDs are local metadata.
+
+Register the configured agent client before using delegated MCP. Registration defaults to empty roles, tools, resources, and scopes and starts in `PENDING`. An administrator can explicitly grant the supported HR permission set at registration or through a later access review. Activation is explicit. The supported transitions are `PENDING → ACTIVE`, `ACTIVE → SUSPENDED`, `SUSPENDED → ACTIVE`, and deprovisioning from any nonterminal state. `DEPROVISIONED` is terminal.
+
+Suspension blocks new delegation and protected calls. Deprovisioning also clears assigned permissions and revokes credential metadata locally. Lifecycle and permission changes advance a registry generation, so handoffs from an earlier generation fail even after reactivation. The tool checks registry access before exchange and again before returning a result. OPA independently requires an active registry entry for the verified client, approved assigned permissions, and the existing rules for role, scope, audience, and expiry. An OPA deny or failure still blocks execution.
+
+### Administration
+
+All endpoints below require a verified human bearer token from the configured human client with the `gateway_admin` realm role. A service-account bearer cannot administer its identity, even if it carries that role.
+
+| Method and path | Operation |
+|---|---|
+| `POST /admin/agents` | Register a local identity with approved initial grants |
+| `GET /admin/agents`, `GET /admin/agents/{id}` | List or inspect agent metadata |
+| `POST /admin/agents/{id}/state/{target}` | Activate, suspend, reactivate, or deprovision with a reason code |
+| `POST /admin/agents/{id}/rotations` | Record a pending rotation request |
+| `POST /admin/agents/{id}/rotations/{rotation_id}/apply` | Ask the configured provider to execute a pending rotation |
+| `POST /admin/agents/{id}/provider-revocation` | Request external disablement after local deprovisioning |
+| `POST /admin/agents/{id}/reviews`, `GET /admin/agents/{id}/reviews` | Create or list reviews, optionally proposing replacement grants |
+| `POST /admin/agents/{id}/reviews/{review_id}/decision` | Approve or reject. Approval can apply proposed local grants. |
+| `GET /admin/audit`, `GET /admin/audit/integrity` | Read audit events or check chain integrity |
+
+Onboarding registers the client locally. The shipped gateway does not provision, rotate, or disable clients in Keycloak. The optional provider interface was tested with a mock and is unconfigured by default. A request records intent. Only a provider confirmation updates the credential version and rotation timestamp. The gateway then rejects registered workload bearers whose signed `iat` is at or before the rotation second. This cutoff does not determine which secret was used to mint a newer token or revoke tokens at Keycloak.
+
+Create reviews on the desired schedule. Reviews report inactivity, overdue reviews, expired credentials, retained permissions on suspended agents, and excess or drift from approvals. When a provider supplies observations, reviews include those observations. Findings do not revoke access by themselves. An authorized approval applies proposed local grants only if the reviewed registry generation is still current.
+
+### Durable audit and integrity
+
+Events use UTC timestamps, IDs, server-generated correlation IDs, event types, decisions, reason codes, and relevant actor, subject, agent, action, resource and scope fields. The gateway records authentication, delegation and exchange outcomes, OPA decisions, tool use, and governance changes. Bearer tokens, secrets, headers, cookies, and handoffs are excluded. Audit retrieval accepts `after`, `limit`, `event_type`, `agent`, and `decision`. Use the last returned sequence as the next cursor.
+
+SQLite transactions commit governance changes and their audit records together. Each event hash covers the sequence, previous hash, and canonical record. The stored head lets the verifier detect missing trailing events as well as edits, gaps, and reordering within the retained chain. To verify an existing database offline without opening it for writing:
+
+```powershell
+.venv\Scripts\python.exe -m app.audit.verify gateway-state.sqlite3
+```
+
+A privileged operator who rewrites the chain and its stored head can defeat this check. Use restricted storage, backups, and independent checkpointing where required. Browser sessions and handoffs remain process-local. The gateway rechecks revocation before the current demonstration tool returns a result, but cannot retract an exchange already sent to the provider. External provider operations interrupted in `RUNNING` require reconciliation before retry. No live provider reconciliation or scheduled review runner ships in this phase.

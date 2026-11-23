@@ -24,6 +24,7 @@ from app.identity.delegation import (
     ExchangeRejected,
     InvalidExchangeResponse,
 )
+from app.identity.lifecycle_models import HR_GRANTS, Registration, State
 from app.identity.tokens import (
     InvalidToken,
     KeycloakUnavailable,
@@ -43,6 +44,7 @@ SUBJECT = "human-subject"
 def settings():
     return Settings(
         _env_file=None,
+        gateway_database=":memory:",
         keycloak_issuer="https://idp.test/realms/test",
         keycloak_client_id=HUMAN,
         keycloak_client_secret="mock-human-secret",
@@ -155,7 +157,17 @@ def gateway(settings, provider, opa_decision):
         ),
         base_url="https://gateway.test", follow_redirects=False,
     ) as client:
+        seed_agent(client)
         yield client
+
+
+def seed_agent(client):
+    lifecycle = client.app.state.lifecycle
+    lifecycle.register(
+        Registration(id="fixture-agent", client_id=CLIENT, display_name="Fixture agent", approved=HR_GRANTS),
+        "fixture-admin", "fixture-correlation",
+    )
+    return lifecycle.transition("fixture-agent", State.ACTIVE, "approved_onboarding", "fixture-admin", "fixture-correlation")
 
 
 @pytest.fixture(scope="module")
@@ -321,6 +333,112 @@ def test_mcp_checks_bearer_and_consumes_handoff_once(gateway, provider):
     assert len(provider.exchanges) == 1
 
 
+def admin_headers(provider):
+    return {"Authorization": f"Bearer {provider.human(realm_access={'roles': ['gateway_admin']})}"}
+
+
+def test_governance_http_onboarding_and_audit_require_verified_admin(gateway, provider):
+    body = {"id": "new-agent", "client_id": "new-client", "display_name": "New agent"}
+    ordinary = {"Authorization": f"Bearer {provider.human()}"}
+    workload = provider.actor(realm_access={"roles": ["hr_agent", "gateway_admin"]})
+    assert gateway.post("/admin/agents", json=body).status_code == 401
+    assert gateway.post("/admin/agents", headers=ordinary, json=body).status_code == 403
+    assert gateway.post("/admin/agents", headers={"Authorization": f"Bearer {workload}"}, json=body).status_code == 401
+    headers = admin_headers(provider)
+    rejected = gateway.post("/admin/agents", headers=headers, json={**body, "client_secret": "sensitive-fixture"})
+    assert rejected.status_code == 422 and "sensitive-fixture" not in rejected.text
+    created = gateway.post("/admin/agents", headers={**headers, "X-Correlation-ID": "untrusted"}, json=body)
+    assert created.status_code == 201
+    assert created.json()["status"] == "PENDING"
+    assert not any(created.json()["assigned"].values())
+    assert gateway.post("/admin/agents", headers=headers, json=body).status_code == 409
+    assert gateway.get("/admin/agents/new-agent", headers=headers).json()["created_by"] == SUBJECT
+    assert gateway.get("/admin/agents", headers=headers, params={"after": "fixture-agent", "limit": 1}).json()[0]["id"] == body["id"]
+    assert gateway.get("/admin/audit", headers=ordinary).status_code == 403
+    events = gateway.get("/admin/audit", headers=headers, params={
+        "agent": body["id"], "event_type": "agent_onboarded", "limit": 1,
+    }).json()
+    assert len(events) == 1 and events[0]["correlation_id"] == created.headers["X-Correlation-ID"]
+    assert events[0]["correlation_id"] != "untrusted"
+    assert gateway.get("/admin/audit/integrity", headers=headers).json()["valid"]
+
+
+@pytest.mark.parametrize("target", ["SUSPENDED", "DEPROVISIONED"])
+def test_inactive_agent_cannot_use_pending_handoff_or_administer_itself(gateway, provider, target):
+    code = handoff(gateway, provider)
+    actor = provider.actor(realm_access={"roles": ["hr_agent", "gateway_admin"]})
+    workload = {"Authorization": f"Bearer {actor}"}
+    ordinary = {"Authorization": f"Bearer {provider.human()}"}
+    path = "/admin/agents/fixture-agent/state"
+    payload = {"reason": "incident"}
+    assert gateway.post(f"{path}/{target}", headers=ordinary, json=payload).status_code == 403
+    changed = gateway.post(f"{path}/{target}", headers=admin_headers(provider), json=payload)
+    assert changed.status_code == 200 and changed.json()["status"] == target
+    assert gateway.post(f"{path}/ACTIVE", headers=workload, json={"reason": "restored"}).status_code == 401
+    assert gateway.get("/agent/me", headers=workload).status_code == 403
+    assert gateway.get("/auth/login?delegate=true").status_code == 403
+    assert tool(gateway, code, actor)["result"]["isError"]
+    if target == "SUSPENDED":
+        assert gateway.post(
+            f"{path}/ACTIVE", headers=admin_headers(provider), json={"reason": "restored"},
+        ).status_code == 200
+        assert tool(gateway, code, actor)["result"]["isError"]
+    assert not provider.exchanges
+
+
+def test_revocation_between_opa_and_local_execution_prevents_invocation(gateway, provider, monkeypatch):
+    code = handoff(gateway, provider)
+    state = gateway.app.state
+    authorize = state.authorizer.authorize_team_read
+
+    def allow_then_revoke(identity, agent):
+        authorize(identity, agent)
+        state.lifecycle.transition(agent.id, State.DEPROVISIONED, "incident", "fixture-admin", "fixture-correlation")
+
+    def reject_execution(_identity):
+        pytest.fail("Tool executed after local deprovisioning")
+
+    monkeypatch.setattr(state.authorizer, "authorize_team_read", allow_then_revoke)
+    monkeypatch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
+    assert tool(gateway, code, provider.actor())["result"]["isError"]
+    assert len(provider.exchanges) == 1
+    assert state.storage.events(20, 0, "opa_decision", "fixture-agent", "allow")
+    assert not state.storage.events(20, 0, "mcp_invocation", "fixture-agent", "allow")
+
+
+def test_workload_cannot_decide_reviews_and_approved_revocation_changes_permissions(gateway, provider):
+    path = "/admin/agents/fixture-agent/reviews"
+    headers = admin_headers(provider)
+    review = gateway.post(path, headers=headers, json={"proposed": {}})
+    assert review.status_code == 201
+    decision = f"{path}/{review.json()['id']}/decision"
+    assert gateway.post(
+        decision, headers={"Authorization": f"Bearer {provider.actor()}"},
+        json={"decision": "APPROVED"},
+    ).status_code == 401
+    assert gateway.post(
+        decision, headers={"Authorization": f"Bearer {provider.human()}"},
+        json={"decision": "APPROVED"},
+    ).status_code == 403
+    applied = gateway.post(decision, headers=headers, json={"decision": "APPROVED"})
+    assert applied.status_code == 200 and applied.json()["decision"] == "APPROVED"
+    assert gateway.get("/auth/login?delegate=true").status_code == 403
+
+
+def test_successful_tool_writes_correlated_credential_free_audit(gateway, provider):
+    code = handoff(gateway, provider)
+    bearer = provider.actor()
+    assert not tool(gateway, code, bearer)["result"].get("isError")
+    events = gateway.app.state.storage.events(100, 0, None, None, None)
+    invoked = next(event for event in events if event.event_type == "mcp_invocation")
+    assert {event.event_type for event in events if event.correlation_id == invoked.correlation_id} == {
+        "agent_auth", "delegation_accepted", "exchange", "opa_decision", "mcp_invocation",
+    }
+    assert any(event.event_type == "delegation_created" for event in events)
+    assert all(value not in str(events) for value in (code, bearer, "mock-agent-secret", "Authorization:"))
+    assert gateway.app.state.lifecycle.details("fixture-agent").last_access_at is not None
+
+
 @pytest.mark.parametrize("opa_payload", [{"result": {"allow": False}}, {}, {"result": {"allow": "true"}}])
 def test_mcp_never_executes_tool_without_explicit_opa_allow(
     gateway, provider, opa_decision, opa_payload, monkeypatch,
@@ -345,6 +463,7 @@ def test_mcp_runtime_uses_real_opa_policy(settings, provider, opa_server):
         create_app(settings, transport=httpx.MockTransport(provider.respond)),
         base_url="https://gateway.test", follow_redirects=False,
     ) as gateway:
+        seed_agent(gateway)
         actor = provider.actor()
         allowed = tool(gateway, handoff(gateway, provider), actor)["result"]
         assert not allowed.get("isError", False)

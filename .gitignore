@@ -16,3 +16,5 @@ credentials/
 *.key
 *.p12
 *.pfx
+*.sqlite3
+*.sqlite3-*

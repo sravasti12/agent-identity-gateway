@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from app.identity.delegation import TOOL_SCOPE, DelegationDenied, delegation_scope
+from app.identity.lifecycle import LifecycleError
 from app.identity.sessions import (
     HANDOFF_TTL,
     LOGIN_COOKIE,
@@ -29,11 +30,20 @@ def login(request: Request, delegate: bool = False) -> Response:
     app = request.app.state
     settings = app.settings
     scopes = "openid profile"
+    generation = None
     if delegate:
         if not settings.delegation_enabled:
             return JSONResponse({"detail": "Delegation unavailable"}, 404)
+        try:
+            generation = app.lifecycle.check_hr(settings.keycloak_hr_agent_client_id).generation
+        except LifecycleError as error:
+            app.storage.audit("delegation_rejected", "start", "deny", error.code, request.state.correlation_id,
+                              agent=error.agent_id)
+            return JSONResponse({"detail": "Delegation denied"}, 403)
         scopes += f" {TOOL_SCOPE} {delegation_scope(settings.keycloak_hr_agent_client_id)}"
-    attempt = LoginAttempt(verifier=token_urlsafe(48), nonce=token_urlsafe(32), delegate=delegate)
+    attempt = LoginAttempt(
+        verifier=token_urlsafe(48), nonce=token_urlsafe(32), delegate=delegate, agent_generation=generation,
+    )
     state = app.login_attempts.add(attempt)
     digest = hashlib.sha256(attempt.verifier.encode("ascii")).digest()
     challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
@@ -73,9 +83,11 @@ def callback(request: Request) -> Response:
         or len(returned_states) != 1
         or not compare_digest(state.encode(), returned_states[0].encode())
     ):
+        app.storage.audit("human_auth", "callback", "failure", "invalid_state", request.state.correlation_id)
         return JSONResponse({"detail": "Invalid login state"}, 400, headers=PRIVATE_HEADERS)
     attempt = app.login_attempts.get(state, consume=True)
     if attempt is None:
+        app.storage.audit("human_auth", "callback", "failure", "expired_or_used_state", request.state.correlation_id)
         return JSONResponse({"detail": "Invalid login state"}, 400, headers=PRIVATE_HEADERS)
 
     codes = query.getlist("code")
@@ -84,6 +96,7 @@ def callback(request: Request) -> Response:
     if "error" in query or len(codes) != 1 or not codes[0] or (
         issuers and issuers != [settings.keycloak_issuer]
     ):
+        app.storage.audit("human_auth", "callback", "failure", "invalid_callback", request.state.correlation_id)
         response = JSONResponse({"detail": "Login failed"}, 400, headers=PRIVATE_HEADERS)
     else:
         response = complete_login(request, codes[0], attempt)
@@ -101,20 +114,27 @@ def delegation_handoff(request: Request) -> Response:
         return JSONResponse({"detail": "Delegation unavailable"}, 404)
     redirect = urlsplit(app.settings.keycloak_redirect_uri)
     if request.headers.get("Origin") != f"{redirect.scheme}://{redirect.netloc}":
+        app.storage.audit("delegation_rejected", "claim_handoff", "deny", "origin_denied", request.state.correlation_id)
         return JSONResponse({"detail": "Origin not permitted"}, 403)
     handle = request.cookies.get(SESSION_COOKIE, "")
     session = app.sessions.get(handle)
     if session is None:
+        app.storage.audit("delegation_rejected", "claim_handoff", "deny", "session_missing", request.state.correlation_id)
         return JSONResponse({"detail": "Browser session required"}, 401)
     if session.handoff is None or app.handoffs.get(session.handoff) != handle:
+        app.storage.audit("delegation_rejected", "claim_handoff", "deny", "no_handoff", request.state.correlation_id)
         return JSONResponse({"detail": "No active delegation handoff"}, 403)
     try:
         app.delegation.verify_subject(session.token)
+        app.lifecycle.check_hr(app.settings.keycloak_hr_agent_client_id, session.agent_generation)
     except InvalidToken:
+        app.storage.audit("delegation_rejected", "claim_handoff", "deny", "invalid_subject", request.state.correlation_id)
         return JSONResponse({"detail": "Browser session expired"}, 401)
-    except DelegationDenied:
+    except (DelegationDenied, LifecycleError):
+        app.storage.audit("delegation_rejected", "claim_handoff", "deny", "handoff_denied", request.state.correlation_id)
         return JSONResponse({"detail": "Delegation denied"}, 403)
     except KeycloakUnavailable:
+        app.storage.audit("delegation_rejected", "claim_handoff", "deny", "provider_unavailable", request.state.correlation_id)
         return JSONResponse({"detail": "Identity provider unavailable"}, 503)
     return JSONResponse({"handoff": session.handoff, "expires_within_seconds": HANDOFF_TTL})
 
@@ -122,6 +142,8 @@ def delegation_handoff(request: Request) -> Response:
 def complete_login(request: Request, code: str, attempt: LoginAttempt) -> Response:
     app = request.app.state
     settings = app.settings
+    audit = app.storage.audit
+    correlation = request.state.correlation_id
     try:
         result = app.http.post(
             f"{settings.keycloak_issuer}/protocol/openid-connect/token",
@@ -135,6 +157,7 @@ def complete_login(request: Request, code: str, attempt: LoginAttempt) -> Respon
             },
         )
         if result.status_code == 400:
+            audit("human_auth", "callback", "failure", "provider_rejected", correlation)
             return JSONResponse({"detail": "Login failed"}, 401, headers=PRIVATE_HEADERS)
         result.raise_for_status()
         tokens = result.json()
@@ -171,19 +194,31 @@ def complete_login(request: Request, code: str, attempt: LoginAttempt) -> Respon
             user, _ = app.verifier.access_human(access_token)
         if user.subject != claims["sub"]:
             raise InvalidToken
-    except DelegationDenied:
+        agent = (
+            app.lifecycle.check_hr(settings.keycloak_hr_agent_client_id, attempt.agent_generation)
+            if attempt.delegate else None
+        )
+    except (DelegationDenied, LifecycleError):
+        audit("delegation_rejected", "callback", "deny", "delegation_denied", correlation)
+        audit("human_auth", "callback", "failure", "delegation_denied", correlation)
         return JSONResponse({"detail": "Delegation denied"}, 403, headers=PRIVATE_HEADERS)
     except (httpx.HTTPError, KeycloakUnavailable):
+        audit("human_auth", "callback", "failure", "identity_provider_unavailable", correlation)
         return JSONResponse(
             {"detail": "Identity provider unavailable"}, 503, headers=PRIVATE_HEADERS,
         )
     except ValueError:
+        audit("human_auth", "callback", "failure", "invalid_token", correlation)
         return JSONResponse({"detail": "Login failed"}, 401, headers=PRIVATE_HEADERS)
 
+    audit("human_auth", "callback", "success", "authenticated", correlation, subject=user.subject)
+    if agent is not None:
+        audit("delegation_created", "create_handoff", "success", "consent_verified", correlation,
+              subject=user.subject, agent=agent.id, resource="hr_team/demo-team", scope=TOOL_SCOPE)
     previous = request.cookies.get(SESSION_COOKIE)
     if previous:
         app.sessions.get(previous, consume=True)
-    session = BrowserSession(access_token)
+    session = BrowserSession(access_token, agent_generation=attempt.agent_generation)
     handle = app.sessions.add(session)
     if attempt.delegate:
         session.handoff = app.handoffs.add(handle)

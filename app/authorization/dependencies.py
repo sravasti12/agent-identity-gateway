@@ -9,6 +9,7 @@ from app.identity.tokens import InvalidToken, KeycloakUnavailable, User
 
 def authenticated_user(request: Request) -> User:
     app = request.app.state
+    correlation = request.state.correlation_id
     authorization = request.headers.get("Authorization")
     if authorization is None:
         session = app.sessions.get(request.cookies.get(SESSION_COOKIE, ""))
@@ -20,14 +21,18 @@ def authenticated_user(request: Request) -> User:
         status_code=401, detail="Authentication required", headers={"WWW-Authenticate": "Bearer"},
     )
     if not token:
+        app.storage.audit("human_auth", "authenticate", "failure", "missing_human_credential", correlation)
         raise unauthorized
     try:
         user, _ = app.verifier.access_human(token)
-        return user
     except InvalidToken:
+        app.storage.audit("human_auth", "authenticate", "failure", "invalid_human_credential", correlation)
         raise unauthorized from None
     except KeycloakUnavailable:
+        app.storage.audit("human_auth", "authenticate", "failure", "identity_provider_unavailable", correlation)
         raise HTTPException(503, "Identity provider unavailable") from None
+    app.storage.audit("human_auth", "authenticate", "success", "authenticated", correlation, actor=user.subject)
+    return user
 
 
 CurrentUser = Annotated[User, Depends(authenticated_user)]

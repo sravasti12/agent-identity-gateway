@@ -108,6 +108,10 @@ class TokenVerifier:
         return user, claims
 
     def access_agent(self, token: str, client_id: str) -> tuple[User, int]:
+        user, claims = self.agent_identity(token, client_id)
+        return user, claims["exp"]
+
+    def agent_identity(self, token: str, client_id: str) -> tuple[User, dict[str, Any]]:
         user, claims = self.access_identity(token)
         if type(claims["exp"]) is not int:
             raise InvalidToken
@@ -119,7 +123,7 @@ class TokenVerifier:
             or "hr_agent" not in user.realm_roles
         ):
             raise WrongAgentIdentity
-        return user, claims["exp"]
+        return user, claims
 
     def access_identity(self, token: str) -> tuple[User, dict[str, Any]]:
         claims = self.decode(token, self.settings.keycloak_api_audience, ["preferred_username"])

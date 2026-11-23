@@ -18,6 +18,7 @@ from config.settings import Settings
 def settings() -> Settings:
     return Settings(
         _env_file=None,
+        gateway_database=":memory:",
         keycloak_issuer="https://keycloak.test/realms/test",
         keycloak_client_id="test-client",
         keycloak_client_secret="fixture-secret",

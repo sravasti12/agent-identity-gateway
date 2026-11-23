@@ -15,12 +15,14 @@ class LoginAttempt:
     verifier: str
     nonce: str
     delegate: bool = False
+    agent_generation: int | None = None
 
 
 @dataclass
 class BrowserSession:
     token: str = field(repr=False)
     handoff: str | None = field(default=None, repr=False)
+    agent_generation: int | None = None
 
 
 class ExpiringStore[T]:
