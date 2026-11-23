@@ -11,10 +11,13 @@ from pydantic import ValidationError
 
 from app.gateway.main import create_app
 from app.identity import agent_tokens
-from app.identity.agent_tokens import AgentCredentialsRejected, AgentTokenService, InvalidAgentTokenResponse
+from app.identity.agent_tokens import (
+    AgentCredentialsRejected,
+    AgentTokenService,
+    InvalidAgentTokenResponse,
+)
 from app.identity.tokens import KeycloakUnavailable, TokenVerifier
 from config.settings import Settings
-
 
 CLIENT_ID = "test-hr-agent"
 FIXTURE_SECRET = "mock-agent-secret"
@@ -209,7 +212,7 @@ def test_diagnostic_requires_agent_bearer_and_preserves_human_role_checks(gatewa
     }
     assert response.headers["cache-control"] == "no-store"
     for path in ("/hr/team", "/employee/me"):
-        assert gateway.get(path, headers=bearer(token)).status_code == 403
+        assert gateway.get(path, headers=bearer(token)).status_code == 401
     assert keycloak.exchanges == 1
 
 

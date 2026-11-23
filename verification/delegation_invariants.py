@@ -9,7 +9,11 @@ class DelegationModel:
 
     actor_authorized = z3.Bool("actor_authorized")
     subject_signature_valid = z3.Bool("subject_signature_valid")
+    actor_signature_valid = z3.Bool("actor_signature_valid")
     delegated_signature_valid = z3.Bool("delegated_signature_valid")
+    subject_has_hr_manager = z3.Bool("subject_has_hr_manager")
+    delegated_subject_has_hr_manager = z3.Bool("delegated_subject_has_hr_manager")
+    actor_has_hr_agent = z3.Bool("actor_has_hr_agent")
     unexpired = z3.Bool("unexpired")
     subject = z3.Int("subject")
     delegated_subject = z3.Int("delegated_subject")
@@ -27,7 +31,12 @@ class DelegationModel:
         return z3.And(
             self.actor_authorized,
             self.subject_signature_valid,
+            self.actor_signature_valid,
             self.delegated_signature_valid,
+            self.subject_has_hr_manager,
+            self.delegated_subject_has_hr_manager,
+            self.actor_has_hr_agent,
+            self.actor_permissions == z3.If(self.actor_has_hr_agent, self.tool_permission, z3.BitVecVal(0, 4)),
             self.unexpired,
             self.delegated_subject == self.subject,
             self.caller_actor == self.allowed_actor,

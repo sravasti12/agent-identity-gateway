@@ -1,3 +1,4 @@
+import logging
 from time import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -14,6 +15,7 @@ from app.identity.delegation import (
     TOOL_SCOPE,
     DelegationDenied,
     DelegationService,
+    ExchangeLifetimeError,
     ExchangeRejected,
     InvalidExchangeResponse,
 )
@@ -76,6 +78,7 @@ class Provider:
     def human(self, **kwargs):
         claims = {
             "azp": HUMAN, "aud": [AUDIENCE, CLIENT],
+            "sid": "fixture-browser-session",
             "scope": f"openid profile {TOOL_SCOPE} delegation:client:{CLIENT}",
             "may_act": {"sub": ACTOR_SUBJECT, "client_id": CLIENT},
         }
@@ -162,7 +165,7 @@ def test_exchange_validates_and_downscopes(service, provider):
     ({"may_act": None}, DelegationDenied),
     ({"may_act": {"sub": "unrelated", "client_id": CLIENT}}, DelegationDenied),
     ({"scope": f"openid delegation:client:{CLIENT}"}, DelegationDenied),
-    ({"azp": "unrelated-client"}, DelegationDenied),
+    ({"azp": "unrelated-client"}, InvalidToken),
 ])
 def test_rejects_bad_subject_before_exchange(service, provider, claims, error):
     with pytest.raises(error):
@@ -206,6 +209,8 @@ def test_malformed_exchange_response(service, provider, response):
     ({"aud": [AUDIENCE, "another-api"]}, InvalidExchangeResponse),
     ({"exp": 1}, InvalidExchangeResponse),
     ({"act": {"sub": "unrelated", "client_id": CLIENT}}, InvalidExchangeResponse),
+    ({"act": {"sub": ACTOR_SUBJECT, "client_id": "unrelated-client"}}, InvalidExchangeResponse),
+    ({"azp": "unrelated-client"}, InvalidExchangeResponse),
     ({"sub": "unrelated-human"}, InvalidExchangeResponse),
     ({"scope": "profile"}, DelegationDenied),
     ({"scope": f"{TOOL_SCOPE} hr_team_write"}, DelegationDenied),
@@ -305,5 +310,109 @@ def test_declined_consent_does_not_create_handoff(gateway, provider):
 
 
 def test_delegated_token_cannot_be_used_as_direct_human_bearer(gateway, provider):
-    token = provider.sign(act={"sub": ACTOR_SUBJECT, "client_id": CLIENT})
+    token = provider.human(act={"sub": ACTOR_SUBJECT, "client_id": CLIENT})
     assert gateway.get("/hr/team", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+@pytest.mark.parametrize(("path", "role"), [("/hr/team", "hr_manager"), ("/employee/me", "employee")])
+def test_direct_routes_require_human_token_class(gateway, provider, path, role):
+    roles = {"roles": [role]}
+    rejected = [
+        provider.actor(realm_access=roles),
+        provider.human(azp="unrelated-client", realm_access=roles),
+        provider.human(act={"sub": ACTOR_SUBJECT}, realm_access=roles),
+        provider.human(exp=1, realm_access=roles),
+        provider.human(aud="wrong-api", realm_access=roles),
+        provider.human(client_id=HUMAN, preferred_username="ordinary-looking-name", realm_access=roles),
+        provider.human(sid=None, realm_access=roles),
+    ]
+    for token in rejected:
+        assert gateway.get(path, headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+    valid = provider.human(preferred_username="service-account-looking-user", realm_access=roles)
+    assert gateway.get(path, headers={"Authorization": f"Bearer {valid}"}).status_code == 200
+
+
+@pytest.mark.parametrize(("subject_lifetime", "actor_lifetime"), [(100, 200), (200, 100)])
+def test_exchange_accepts_expiration_at_shortest_input(service, provider, subject_lifetime, actor_lifetime):
+    now = int(time())
+    expiry = now + min(subject_lifetime, actor_lifetime)
+    provider.output_claims["exp"] = expiry
+    assert service.exchange(
+        provider.human(exp=now + subject_lifetime), provider.actor(exp=now + actor_lifetime),
+    ).expires_at == expiry
+
+
+@pytest.mark.parametrize(("subject_lifetime", "actor_lifetime", "output_lifetime", "reason"), [
+    (90, 200, 100, "subject_expiry_exceeded"),
+    (200, 90, 100, "actor_expiry_exceeded"),
+    (200, 200, -1, "response_expired"),
+    (600, 600, 500, "max_lifetime_exceeded"),
+])
+def test_exchange_rejects_invalid_lifetimes(service, provider, subject_lifetime, actor_lifetime, output_lifetime, reason):
+    now = int(time())
+    provider.output_claims["exp"] = now + output_lifetime
+    with pytest.raises(ExchangeLifetimeError, match=f"^{reason}$"):
+        service.exchange(
+            provider.human(exp=now + subject_lifetime), provider.actor(exp=now + actor_lifetime),
+        )
+
+
+@pytest.mark.parametrize("lifetime", [0, 301])
+def test_rejects_invalid_reported_lifetime(service, provider, lifetime):
+    provider.override_exchange = httpx.Response(200, json={
+        "access_token": "opaque-fixture-value", "expires_in": lifetime,
+        "token_type": "Bearer", "issued_token_type": ACCESS_TOKEN_TYPE,
+    })
+    with pytest.raises(ExchangeLifetimeError, match="^invalid_reported_lifetime$"):
+        service.exchange(provider.human(), provider.actor())
+
+
+def test_invalid_actor_signature_and_identical_subject_are_denied(service, provider, settings):
+    forged_actor = Provider(settings, rsa.generate_private_key(public_exponent=65537, key_size=2048)).actor()
+    with pytest.raises(InvalidToken):
+        service.exchange(provider.human(), forged_actor)
+    with pytest.raises(DelegationDenied):
+        service.exchange(provider.human(sub=ACTOR_SUBJECT), provider.actor())
+    assert not provider.exchanges
+
+
+@pytest.mark.parametrize("roles", [
+    {"test-api": {"roles": ["manage"]}},
+    {"unrelated": {"roles": ["read"]}},
+    {"unrelated": {"roles": "read"}},
+])
+def test_rejects_added_or_malformed_client_roles(service, provider, roles):
+    provider.output_claims["resource_access"] = roles
+    with pytest.raises(InvalidExchangeResponse):
+        service.exchange(
+            provider.human(resource_access={"test-api": {"roles": ["read"]}}), provider.actor(),
+        )
+
+
+def test_preserves_existing_client_roles_without_using_them_for_policy(service, provider):
+    roles = {"test-api": {"roles": ["read"]}}
+    provider.output_claims["resource_access"] = roles
+    assert service.exchange(provider.human(resource_access=roles), provider.actor()).granted_scopes == {TOOL_SCOPE}
+
+
+def test_mcp_debug_logs_are_credential_free_and_preserve_security_events(gateway, provider, caplog):
+    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="mcp.server.lowlevel.server")
+    code = handoff(gateway, provider)
+    bearer = provider.actor()
+    unauthorized = provider.actor(realm_access={"roles": ["employee"]})
+    malformed = gateway.post("/mcp", headers={
+        "Accept": "application/json, text/event-stream", "Authorization": f"Bearer {bearer}",
+    }, json={"jsonrpc": "2.0", "id": 1, "method": "invalid", "params": {"handoff": code}})
+    assert "error" in malformed.json()
+    assert tool(gateway, code, unauthorized)["result"]["isError"]
+    assert not provider.exchanges
+    provider.output_claims["exp"] = 1
+    assert tool(gateway, code, bearer)["result"]["isError"]
+    assert "reason=authorization" in caplog.text
+    assert "reason=response_expired" in caplog.text
+    assert "Received message:" not in caplog.text
+    assert all(value not in caplog.text for value in (
+        code, bearer, unauthorized, "Authorization:", "mock-agent-secret",
+    ))

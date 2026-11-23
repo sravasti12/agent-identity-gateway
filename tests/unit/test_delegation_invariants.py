@@ -22,6 +22,13 @@ def test_authorized_delegation_has_a_witness():
     lambda m: z3.Not(m.actor_authorized),
     lambda m: m.delegated_permissions & ~m.actor_permissions != 0,
     lambda m: z3.Not(m.unexpired),
+    lambda m: z3.Not(m.actor_signature_valid),
+    lambda m: z3.Not(m.subject_signature_valid),
+    lambda m: z3.Not(m.delegated_signature_valid),
+    lambda m: m.caller_actor == m.subject,
+    lambda m: z3.Not(m.actor_has_hr_agent),
+    lambda m: z3.Not(m.subject_has_hr_manager),
+    lambda m: z3.Not(m.delegated_subject_has_hr_manager),
 ])
 def test_delegation_invariants(violation):
     model = DelegationModel()

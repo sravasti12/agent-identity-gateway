@@ -22,7 +22,8 @@ def authenticated_user(request: Request) -> User:
     if not token:
         raise unauthorized
     try:
-        return app.verifier.access_user(token)
+        user, _ = app.verifier.access_human(token)
+        return user
     except InvalidToken:
         raise unauthorized from None
     except KeycloakUnavailable:

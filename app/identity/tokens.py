@@ -13,6 +13,10 @@ class InvalidToken(ValueError):
     pass
 
 
+class ExpiredToken(InvalidToken):
+    pass
+
+
 class KeycloakUnavailable(RuntimeError):
     pass
 
@@ -87,14 +91,21 @@ class TokenVerifier:
                 audience=audience,
                 options={"require": ["iss", "aud", "exp", "sub", *required]},
             )
+        except jwt.ExpiredSignatureError:
+            raise ExpiredToken from None
         except (jwt.PyJWTError, TypeError, ValueError, OverflowError):
             raise InvalidToken from None
 
-    def access_user(self, token: str) -> User:
+    def access_human(self, token: str) -> tuple[User, dict[str, Any]]:
         user, claims = self.access_identity(token)
-        if "act" in claims:
+        session = claims.get("sid")
+        if (
+            claims.get("azp") != self.settings.keycloak_client_id
+            or not isinstance(session, str) or not session.strip()
+            or {"act", "client_id", "clientHost", "clientAddress"}.intersection(claims)
+        ):
             raise InvalidToken
-        return user
+        return user, claims
 
     def access_agent(self, token: str, client_id: str) -> tuple[User, int]:
         user, claims = self.access_identity(token)

@@ -4,7 +4,13 @@ from typing import Any, Literal
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.identity.tokens import InvalidToken, KeycloakUnavailable, TokenVerifier, User
+from app.identity.tokens import (
+    ExpiredToken,
+    InvalidToken,
+    KeycloakUnavailable,
+    TokenVerifier,
+    User,
+)
 from config.settings import Settings
 
 ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
@@ -24,6 +30,16 @@ class ExchangeRejected(RuntimeError):
 
 class InvalidExchangeResponse(RuntimeError):
     pass
+
+
+class ExchangeLifetimeError(InvalidExchangeResponse):
+    def __init__(
+        self, category: Literal[
+            "response_expired", "subject_expiry_exceeded", "actor_expiry_exceeded",
+            "max_lifetime_exceeded", "invalid_reported_lifetime",
+        ],
+    ) -> None:
+        super().__init__(category)
 
 
 class ExchangeResponse(BaseModel):
@@ -56,6 +72,19 @@ def delegation_scope(client_id: str) -> str:
     return f"delegation:client:{client_id}"
 
 
+def client_roles(claims: dict[str, Any]) -> set[tuple[str, str]]:
+    clients = claims.get("resource_access", {})
+    if not isinstance(clients, dict):
+        raise InvalidToken
+    assignments: set[tuple[str, str]] = set()
+    for client, access in clients.items():
+        roles = access.get("roles") if isinstance(access, dict) else None
+        if not isinstance(roles, list) or not all(isinstance(role, str) for role in roles):
+            raise InvalidToken
+        assignments.update((client, role) for role in roles)
+    return assignments
+
+
 class DelegationService:
     def __init__(self, settings: Settings, http: httpx.Client, verifier: TokenVerifier) -> None:
         self.settings = settings
@@ -63,15 +92,13 @@ class DelegationService:
         self.verifier = verifier
 
     def verify_subject(self, token: str, actor_subject: str | None = None) -> tuple[User, dict[str, Any]]:
-        subject, claims = self.verifier.access_identity(token)
+        subject, claims = self.verifier.access_human(token)
         client_id = self.settings.keycloak_hr_agent_client_id
         audiences = claims["aud"] if isinstance(claims["aud"], list) else [claims["aud"]]
         actor = claims.get("may_act")
         if (
             not self.settings.delegation_enabled or client_id is None
-            or claims.get("azp") != self.settings.keycloak_client_id
-            or subject.username.startswith("service-account-")
-            or "act" in claims or type(claims["exp"]) is not int
+            or type(claims["exp"]) is not int
             or client_id not in audiences
             or not isinstance(actor, dict)
             or actor.get("client_id") != client_id
@@ -92,6 +119,7 @@ class DelegationService:
             raise DelegationDenied
         actor, actor_exp = self.verifier.access_agent(actor_token, client_id)
         subject, source = self.verify_subject(subject_token, actor.subject)
+        input_roles = client_roles(source)
         try:
             response = self.http.post(
                 f"{settings.keycloak_issuer}/protocol/openid-connect/token",
@@ -123,8 +151,19 @@ class DelegationService:
 
         try:
             result = ExchangeResponse.model_validate_json(response.content)
+        except ValidationError as error:
+            if any(
+                item["loc"] == ("expires_in",) and item["type"] in ("greater_than", "less_than_equal")
+                for item in error.errors(include_input=False)
+            ):
+                raise ExchangeLifetimeError("invalid_reported_lifetime") from None
+            raise InvalidExchangeResponse from None
+        try:
             delegated, claims = self.verifier.access_identity(result.access_token)
-        except (ValidationError, InvalidToken):
+            output_roles = client_roles(claims)
+        except ExpiredToken:
+            raise ExchangeLifetimeError("response_expired") from None
+        except InvalidToken:
             raise InvalidExchangeResponse from None
         expiry = claims["exp"]
         now = time()
@@ -138,10 +177,19 @@ class DelegationService:
             or act.get("sub") != actor.subject or act.get("client_id") != client_id
             or act.get("iss", settings.keycloak_issuer) != settings.keycloak_issuer
             or "act" in act or "may_act" in claims
-            or type(expiry) is not int or not now < expiry <= min(source["exp"], actor_exp, now + MAX_DELEGATED_SECONDS)
+            or type(expiry) is not int
             or not set(delegated.realm_roles) <= set(subject.realm_roles)
+            or not output_roles <= input_roles
         ):
             raise InvalidExchangeResponse
+        if expiry <= now:
+            raise ExchangeLifetimeError("response_expired")
+        if expiry > now + MAX_DELEGATED_SECONDS:
+            raise ExchangeLifetimeError("max_lifetime_exceeded")
+        if expiry > source["exp"]:
+            raise ExchangeLifetimeError("subject_expiry_exceeded")
+        if expiry > actor_exp:
+            raise ExchangeLifetimeError("actor_expiry_exceeded")
         granted = authorization_scopes(claims)
         if (
             TOOL_SCOPE not in granted

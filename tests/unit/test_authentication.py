@@ -47,6 +47,8 @@ class MockKeycloak:
             "aud": self.settings.keycloak_api_audience,
             "sub": "test-subject",
             "preferred_username": "test-user",
+            "azp": self.settings.keycloak_client_id,
+            "sid": "fixture-browser-session",
             "realm_access": {"roles": ["employee"]},
             "typ": "Bearer",
             "iat": int(time()),

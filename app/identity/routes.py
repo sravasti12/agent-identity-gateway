@@ -165,10 +165,12 @@ def complete_login(request: Request, code: str, attempt: LoginAttempt) -> Respon
                 token_hash.encode(), expected_hash.encode()
             ):
                 raise InvalidToken
-        if app.verifier.access_user(access_token).subject != claims["sub"]:
-            raise InvalidToken
         if attempt.delegate:
-            app.delegation.verify_subject(access_token)
+            user, _ = app.delegation.verify_subject(access_token)
+        else:
+            user, _ = app.verifier.access_human(access_token)
+        if user.subject != claims["sub"]:
+            raise InvalidToken
     except DelegationDenied:
         return JSONResponse({"detail": "Delegation denied"}, 403, headers=PRIVATE_HEADERS)
     except (httpx.HTTPError, KeycloakUnavailable):

@@ -124,6 +124,25 @@ Only the sanitized before representation and summarized after-state were availab
 
 Live acceptance requires a recovery-only authenticated configuration readback, an approved `hr_team_read` scope configuration if missing, and separate approval for live token exchange. Exercise positive and negative consent, subject and actor binding, audience and scope narrowing, expiration, ordinary login and workload authentication, and MCP authorization. Keep Phase 3 open until these pass. Handoff state is process-local, the MCP tool returns identity metadata, and external HR data and OPA integration are pending.
 
+### Phase 3 audit remediation
+
+- A dedicated human verifier requires the configured human `azp` and a signed, nonempty `sid`. It rejects delegated and service-account claims. The browser callback, delegation subject check, and direct human roles use this boundary. A workload token now gets 401 on human routes even if it has a human role.
+- MCP SDK log sources that can emit raw requests or validation details are filtered, including the SDK session code that uses the root logger. The gateway emits credential-free authorization outcomes and lifetime categories. Debug tests cover an invalid MCP request and authorization denial with synthetic credentials.
+- Exchange lifetime enforcement remains fail-closed. It distinguishes the subject and actor bounds, expired output, maximum lifetime, and invalid reported lifetime. Additional client-role pairs are rejected. The Z3 model now includes actor signature validity and the static HR role-to-tool mapping, with separate negative cases for each signature, same subject and actor, and missing roles.
+- Handoffs and browser sessions remain process-local. Restart discards them. Multi-worker deployments are unsupported, and immediate browser-session revocation is unavailable. External proxy and telemetry capture still need deployment verification.
+
+Changed `app/authorization/dependencies.py`, `app/identity/delegation.py`, `app/identity/routes.py`, `app/identity/tokens.py`, `app/tools/mcp_server.py`, `verification/delegation_invariants.py`, `tests/unit/test_authentication.py`, `tests/unit/test_agent_authentication.py`, `tests/unit/test_delegation.py`, `tests/unit/test_delegation_invariants.py`, `README.md`, and this tracker. There were no dependency or Keycloak changes.
+
+| Post-remediation check | Result |
+|---|---|
+| `.venv\Scripts\python.exe -m pytest -q` | 114 passed, one existing TestClient/httpx deprecation warning |
+| `.venv\Scripts\python.exe -m ruff check` on changed Python files | Passed |
+| `.venv\Scripts\python.exe -m mypy --explicit-package-bases app config verification` | Passed across 12 files |
+| `.venv\Scripts\python.exe -m compileall -q app config tests verification` | Passed |
+| `.venv\Scripts\python.exe -m pip check` and `git diff --check` | Passed |
+
+Phase 3 stays open. Verify the recovery client's actual browser and workload claims, FGAP V2 and `may_act` provenance, `hr_team_read` assignments, provider lifetime behavior with either input expiring first, and positive and negative tool calls. Live exchange needs separate approval.
+
 ## Engineering Decision Log
 
 | ID | Decision | Reason |
