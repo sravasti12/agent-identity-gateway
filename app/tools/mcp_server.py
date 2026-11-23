@@ -9,8 +9,9 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import State
 from starlette.requests import Request
 
-from app.authorization.delegated import authorize_team_read
+from app.authorization.delegated import PolicyDenied, PolicyUnavailable
 from app.identity.delegation import (
+    DelegatedIdentity,
     DelegationDenied,
     ExchangeLifetimeError,
     ExchangeRejected,
@@ -65,13 +66,16 @@ def read_team(state: State, authorization: str, handoff: str) -> TeamReadResult:
         if state.handoffs.get(handoff, consume=True) != handle:
             raise DelegationDenied
         identity = state.delegation.exchange(session.token, token)
-        authorize_team_read(identity, state.settings.keycloak_api_audience)
+        state.authorizer.authorize_team_read(identity)
     except ExpiredToken:
         logger.info("mcp.team_read.denied reason=input_expired")
         raise ToolError("Delegation input expired") from None
-    except (InvalidToken, WrongAgentIdentity, DelegationDenied):
+    except (InvalidToken, WrongAgentIdentity, DelegationDenied, PolicyDenied):
         logger.info("mcp.team_read.denied reason=authorization")
         raise ToolError("Delegated tool authorization denied") from None
+    except PolicyUnavailable:
+        logger.warning("mcp.team_read.denied reason=policy_unavailable")
+        raise ToolError("Delegated tool authorization unavailable") from None
     except KeycloakUnavailable:
         logger.warning("mcp.team_read.denied reason=provider_unavailable")
         raise ToolError("Identity provider unavailable") from None
@@ -82,6 +86,10 @@ def read_team(state: State, authorization: str, handoff: str) -> TeamReadResult:
         logger.warning("mcp.team_read.denied reason=exchange_failed")
         raise ToolError("Delegated credentials unavailable") from None
     logger.info("mcp.team_read.allowed")
+    return team_read_result(identity)
+
+
+def team_read_result(identity: DelegatedIdentity) -> TeamReadResult:
     return TeamReadResult(
         subject=identity.subject.subject, actor=identity.actor.subject,
         actor_client=identity.actor_client, audience=identity.audience,

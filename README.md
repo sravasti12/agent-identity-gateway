@@ -154,9 +154,9 @@ Delegation is off by default. The opt-in switch is `DELEGATION_ENABLED`. The exi
 1. The human starts at `GET /auth/login?delegate=true`. The existing OIDC PKCE flow asks for `hr_team_read` and `delegation:client:<agent-client-id>`. The callback checks signed subject claims, the actor client and service-account subject in `may_act`, and the granted scopes. After consent, a same-origin browser `POST /auth/delegation` returns an opaque handoff valid for at most two minutes.
 2. The workload calls `read_hr_team` over stateless MCP Streamable HTTP at `/mcp`. It supplies the handoff as the tool argument and its own service-account access token as the HTTP bearer. The gateway verifies that bearer and checks the signed subject-to-actor relationship and the human's HR role before atomically consuming the handoff.
 3. The gateway authenticates to Keycloak as the agent client and sends both signed tokens to the 26.8.2 delegation exchange. The request specifies the API audience and only `hr_team_read`. The gateway verifies the returned JWT, checks that `sub` and `act` match the validated subject and actor, and requires the single API audience. It rejects extra privileges, missing scopes, a refresh token, and expiry beyond either input token or five minutes.
-4. The in-process policy requires `hr_manager`, `hr_agent`, and `hr_team_read` before permitting the tool. The tool returns verified identity metadata for this demonstration. No HR data source is connected. Subject and delegated JWTs stay server-side. The gateway does not retain exchanged JWTs after the operation. [Keycloak 26.8.2 delegation](https://github.com/keycloak/keycloak/blob/26.8.2/docs/guides/securing-apps/token-exchange.adoc) · [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
+4. Authorization requires `hr_manager`, `hr_agent`, and `hr_team_read` before permitting the tool. Phase 4 evaluates this decision in OPA. The tool returns verified identity metadata for this demonstration. No HR data source is connected. Subject and delegated JWTs stay server-side. The gateway does not retain exchanged JWTs after the operation. [Keycloak 26.8.2 delegation](https://github.com/keycloak/keycloak/blob/26.8.2/docs/guides/securing-apps/token-exchange.adoc) · [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
 
-Browser sessions and pending handoffs are process-local. Handoffs are single-use in one process, including when the provider fails after consumption. Restarting the process discards pending handoffs and sessions. Multi-worker deployments are unsupported because sign-in callbacks and tool calls can reach a worker without the corresponding state. A new sign-in invalidates the previous browser session's handoff for subsequent lookups. Immediate browser-session revocation is unavailable, and a request already in flight can race with session replacement. The agent access token is a bearer credential and needs secure transport and storage. The MCP endpoint checks Host and Origin against the configured browser callback origin. The current policy is local Python. OPA and production tool integrations remain future work.
+Browser sessions and pending handoffs are process-local. Handoffs are single-use in one process, including when the provider fails after consumption. Restarting the process discards pending handoffs and sessions. Multi-worker deployments are unsupported because sign-in callbacks and tool calls can reach a worker without the corresponding state. A new sign-in invalidates the previous browser session's handoff for subsequent lookups. Immediate browser-session revocation is unavailable, and a request already in flight can race with session replacement. The agent access token is a bearer credential and needs secure transport and storage. The MCP endpoint checks Host and Origin against the configured browser callback origin.
 
 ### Phase 3 security remediation
 
@@ -170,3 +170,36 @@ Browser sessions and pending handoffs are process-local. Handoffs are single-use
 The post-remediation automated suite reported 114 passed and one pre-existing Starlette TestClient/httpx deprecation warning. It adds human token-class rejection, exact lifetime boundaries, actor signature and subject binding, client-role narrowing, and credential-free MCP debug logging checks. Ruff on changed Python files, Mypy, compilation, dependency checks, and `git diff --check` passed.
 
 Phase 3 remains open. The complete Stage 2A after-state was unavailable. Recovery-only acceptance still requires authenticated client and FGAP readback, confirmation of `may_act` mapper and policy provenance, and confirmation that both clients can request `hr_team_read`. Live tests require separate approval. Verify normal browser JWT claims, ordinary workload authentication, consented access and denial without consent or permission, both token identities, exact API audience, scope and role narrowing, exchanged expiry when either input expires first, and successful and denied MCP calls.
+
+## Phase 4 authorization with OPA and Rego
+
+The gateway verifies JWTs, binds the signed subject and actor, consumes the handoff once, and validates the delegated token. Before `read_hr_team` can produce a result, it calls OPA. The agent must independently have `hr_agent` and match the configured client. Rego also requires the human's `hr_manager` role, distinct subject IDs, the configured audience, an unexpired delegation, and `hr_team_read` for the fixed `hr_team/demo-team` resource. The other permitted scopes are `openid`, `profile`, and `email`. Direct human and agent routes retain their existing behavior.
+
+The gateway sends a JSON object with these fields under `input` to `POST /v1/data/agent_gateway/authorization/decision`.
+
+| Input field | Source |
+|---|---|
+| `human.subject`, `human.roles` | Verified delegated human identity |
+| `actor.subject`, `actor.roles`, `actor.client_id` | Verified agent identity and client binding |
+| `delegation.audience`, `delegation.scopes`, `delegation.expires_at` | Verified delegated token. Expiry is Unix seconds. |
+| `request.tool`, `request.resource.type`, `request.resource.id` | Fixed server values `read_hr_team`, `hr_team`, and `demo-team` |
+| `context.expected_audience`, `context.allowed_agent_client` | Gateway settings |
+
+Only HTTP 200 with `{"result":{"allow":true}}` permits execution. An explicit deny, unavailable or undefined decision, malformed response, or expiry during evaluation blocks the tool. The gateway never sends bearer JWTs, secrets, browser cookies, handoffs, or MCP tool arguments to OPA. There is no Python allow fallback. A denial after handoff consumption still consumes that handoff. [OPA Data API](https://www.openpolicyagent.org/docs/rest-api)
+
+### Run OPA and verify
+
+The standalone Compose file runs OPA 1.12.2 without starting Keycloak. The host gateway defaults to `OPA_URL=http://127.0.0.1:8181`. Compose publishes OPA on loopback, mounts policies read-only, and uses a Rego API policy to restrict access to the decision and health endpoints. Protect OPA from untrusted local processes or use an authenticated private deployment in production.
+
+```powershell
+docker compose -f compose.opa.yml up -d opa
+opa check --strict policies/
+opa test policies/ -v
+$env:OPA_TEST_BINARY = (Get-Command opa.exe).Source
+.venv\Scripts\python.exe -m pytest -q
+Remove-Item Env:OPA_TEST_BINARY
+```
+
+The Python unit tests mock OPA responses to validate transport and fail-closed behavior. Rego tests evaluate the policy independently. With `OPA_TEST_BINARY` set, pytest starts an isolated OPA process on an ephemeral loopback port and exercises MCP with real Rego decisions and mocked Keycloak. This run recorded **143 Python tests passed** with one existing TestClient/httpx warning and **15 Rego cases passed**. A disposable OPA-only Compose run confirmed HTTP 200 health, a default-deny response, and HTTP 401 from the management endpoint. The disposable container and network were removed afterward.
+
+The Z3 model checks an abstract decision with a permitted tool and resource, valid explicit OPA allow, and the existing identity and scope conditions. It does not prove Rego–Python equivalence, policy integrity, or live issuer behavior. The tool still returns verified metadata for one demonstration resource. Live recovery acceptance remains pending separate approval.

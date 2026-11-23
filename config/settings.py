@@ -15,6 +15,15 @@ class Settings(BaseSettings):
     keycloak_hr_agent_client_id: str | None = None
     keycloak_hr_agent_client_secret: SecretStr | None = None
     delegation_enabled: bool = False
+    opa_url: str = "http://127.0.0.1:8181"
+
+    @field_validator("opa_url")
+    @classmethod
+    def validate_opa_url(cls, value: str) -> str:
+        value = cls.validate_url(value)
+        if urlsplit(value).path not in ("", "/"):
+            raise ValueError("OPA URL must be a base URL without a path")
+        return value.rstrip("/")
 
     @field_validator("keycloak_hr_agent_client_id")
     @classmethod

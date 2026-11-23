@@ -29,6 +29,10 @@ def test_authorized_delegation_has_a_witness():
     lambda m: z3.Not(m.actor_has_hr_agent),
     lambda m: z3.Not(m.subject_has_hr_manager),
     lambda m: z3.Not(m.delegated_subject_has_hr_manager),
+    lambda m: z3.Not(m.tool_is_hr_team_read),
+    lambda m: z3.Not(m.resource_is_demo_team),
+    lambda m: z3.Not(m.policy_response_valid),
+    lambda m: z3.Not(m.policy_allows),
 ])
 def test_delegation_invariants(violation):
     model = DelegationModel()

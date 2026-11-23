@@ -22,7 +22,7 @@ Build a security gateway that provides independent identities, delegated access,
 | 1 | Human identity and Keycloak | Implemented and unit-tested. Credentialed integration pending. |
 | 2 | Non-human agent identity | Python backend implemented and verified |
 | 3 | Secure token exchange | Backend implemented and mock-tested. Stage 2A full readback and live exchange pending. |
-| 4 | Protected MCP tool server | Not started |
+| 4 | Centralized authorization with OPA and Rego | Implemented and tested with real OPA and mocked Keycloak. Live acceptance pending. |
 | 5 | OPA authorization | Not started |
 | 6 | Audit and lifecycle automation | Not started |
 | 7 | Security testing and Z3 | Not started |
@@ -142,6 +142,25 @@ Changed `app/authorization/dependencies.py`, `app/identity/delegation.py`, `app/
 | `.venv\Scripts\python.exe -m pip check` and `git diff --check` | Passed |
 
 Phase 3 stays open. Verify the recovery client's actual browser and workload claims, FGAP V2 and `may_act` provenance, `hr_team_read` assignments, provider lifetime behavior with either input expiring first, and positive and negative tool calls. Live exchange needs separate approval.
+
+## Phase 4 OPA authorization
+
+The protected MCP path now uses an explicit Rego decision after JWT and delegation verification. It sends verified subject and actor fields plus fixed tool and resource context using a separate HTTPX client. OPA independently checks both roles, actor client, subject separation, audience, expiry, and scope for `read_hr_team` on `hr_team/demo-team`. A valid boolean allow is required. Unavailable or malformed responses and decisions that arrive after credential expiry deny execution. OPA receives no credentials or MCP arguments.
+
+Added `compose.opa.yml`, `policies/authorization.rego`, `policies/api_authorization.rego`, `policies/authorization_test.rego`, and `tests/unit/test_opa.py`. Updated `.env.example`, `config/settings.py`, `app/authorization/delegated.py`, `app/gateway/main.py`, `app/tools/mcp_server.py`, `tests/unit/test_delegation.py`, `tests/unit/test_delegation_invariants.py`, `verification/delegation_invariants.py`, `README.md`, and this tracker. Existing HTTPX was sufficient. The existing Keycloak Compose file was preserved.
+
+| Check | Actual result |
+|---|---|
+| `pytest -q` with `OPA_TEST_BINARY` set to the checksum-verified OPA 1.12.2 CLI | 143 passed, one existing TestClient/httpx warning. Includes actual OPA allow and deny over HTTP and management endpoint denial, with mocked Keycloak. |
+| `opa check --strict policies/` and `opa test policies/ -v` | Strict compilation passed, 15 of 15 policy cases passed. |
+| Ruff on changed Python files | Passed. Default full-tree Ruff reported two pre-existing import-order findings in `agent_routes.py` and `agent_tokens.py`. |
+| Mypy, compile checks, `pip check`, and `git diff --check` | Passed. |
+| `docker compose -f compose.opa.yml config --quiet` | Validated with local Docker configuration access warnings. |
+| OPA-only Compose smoke test | Pinned container started, health returned 200, empty input returned deny, and management returned 401. The disposable container and network were removed. |
+
+The symbolic model now requires the exact tool and resource, a valid decision response, and explicit policy allow. These are abstract inputs. Real Rego execution is covered separately and live Keycloak behavior remains outside both checks.
+
+Phase 4 acceptance has evidence for policy rules, fail-closed handling, MCP integration with real OPA, and the OPA-only Compose service. Deployment acceptance still requires an approved recovery-only sign-in, exchange, and MCP allow/deny run. The tool still covers one logical resource. Loopback OPA protects the management API with a path policy and relies on the host trust boundary for local decision-query access. Phase 5 has not begun.
 
 ## Engineering Decision Log
 

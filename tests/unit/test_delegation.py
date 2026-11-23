@@ -1,5 +1,9 @@
 import logging
-from time import time
+import os
+import socket
+import subprocess
+from pathlib import Path
+from time import monotonic, sleep, time
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -8,6 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
+from app.authorization.delegated import DECISION_PATH
 from app.gateway.main import create_app
 from app.identity.delegation import (
     ACCESS_TOKEN_TYPE,
@@ -133,12 +138,61 @@ def service(settings, provider):
 
 
 @pytest.fixture
-def gateway(settings, provider):
+def opa_decision():
+    return {"result": {"allow": True}}
+
+
+@pytest.fixture
+def gateway(settings, provider, opa_decision):
+    def respond(request):
+        assert request.url.path == DECISION_PATH
+        return httpx.Response(200, json=opa_decision)
+
     with TestClient(
-        create_app(settings, transport=httpx.MockTransport(provider.respond)),
+        create_app(
+            settings, transport=httpx.MockTransport(provider.respond),
+            opa_transport=httpx.MockTransport(respond),
+        ),
         base_url="https://gateway.test", follow_redirects=False,
     ) as client:
         yield client
+
+
+@pytest.fixture(scope="module")
+def opa_server():
+    binary = os.environ.get("OPA_TEST_BINARY")
+    if not binary:
+        pytest.skip("Set OPA_TEST_BINARY to run the real OPA integration")
+    with socket.socket() as server_socket:
+        server_socket.bind(("127.0.0.1", 0))
+        port = server_socket.getsockname()[1]
+    base_url = f"http://127.0.0.1:{port}"
+    policy_dir = Path(__file__).resolve().parents[2] / "policies"
+    with subprocess.Popen(
+        [
+            binary, "run", "--server", f"--addr=127.0.0.1:{port}", "--authorization=basic",
+            "--skip-version-check", str(policy_dir / "authorization.rego"),
+            str(policy_dir / "api_authorization.rego"),
+        ],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    ) as process:
+        try:
+            with httpx.Client(base_url=base_url, trust_env=False, timeout=0.2) as http:
+                deadline = monotonic() + 6
+                while monotonic() < deadline and process.poll() is None:
+                    try:
+                        if http.get("/health").status_code == 200:
+                            break
+                    except httpx.RequestError:
+                        pass
+                    sleep(0.05)
+                else:
+                    pytest.fail("OPA did not become healthy")
+                assert http.get("/v1/policies").status_code in (401, 403)
+            yield base_url
+        finally:
+            process.terminate()
 
 
 def test_exchange_validates_and_downscopes(service, provider):
@@ -265,6 +319,40 @@ def test_mcp_checks_bearer_and_consumes_handoff_once(gateway, provider):
     }
     assert tool(gateway, code, token)["result"]["isError"]
     assert len(provider.exchanges) == 1
+
+
+@pytest.mark.parametrize("opa_payload", [{"result": {"allow": False}}, {}, {"result": {"allow": "true"}}])
+def test_mcp_never_executes_tool_without_explicit_opa_allow(
+    gateway, provider, opa_decision, opa_payload, monkeypatch,
+):
+    opa_decision.clear()
+    opa_decision.update(opa_payload)
+
+    def reject_execution(_identity):
+        pytest.fail("Tool was executed without explicit OPA allow")
+
+    monkeypatch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
+    code = handoff(gateway, provider)
+    actor = provider.actor()
+    assert tool(gateway, code, actor)["result"]["isError"]
+    assert tool(gateway, code, actor)["result"]["isError"]
+    assert len(provider.exchanges) == 1
+
+
+def test_mcp_runtime_uses_real_opa_policy(settings, provider, opa_server):
+    settings.opa_url = opa_server
+    with TestClient(
+        create_app(settings, transport=httpx.MockTransport(provider.respond)),
+        base_url="https://gateway.test", follow_redirects=False,
+    ) as gateway:
+        actor = provider.actor()
+        allowed = tool(gateway, handoff(gateway, provider), actor)["result"]
+        assert not allowed.get("isError", False)
+        assert allowed["structuredContent"]["subject"] == SUBJECT
+        provider.output_claims["realm_access"] = {"roles": []}
+        denied = tool(gateway, handoff(gateway, provider), actor)["result"]
+        assert denied["isError"]
+        assert len(provider.exchanges) == 2
 
 
 def test_mcp_denies_missing_hr_authority_and_unknown_tool(gateway, provider):

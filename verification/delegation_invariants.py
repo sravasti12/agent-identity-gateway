@@ -15,6 +15,10 @@ class DelegationModel:
     delegated_subject_has_hr_manager = z3.Bool("delegated_subject_has_hr_manager")
     actor_has_hr_agent = z3.Bool("actor_has_hr_agent")
     unexpired = z3.Bool("unexpired")
+    tool_is_hr_team_read = z3.Bool("tool_is_hr_team_read")
+    resource_is_demo_team = z3.Bool("resource_is_demo_team")
+    policy_response_valid = z3.Bool("policy_response_valid")
+    policy_allows = z3.Bool("policy_allows")
     subject = z3.Int("subject")
     delegated_subject = z3.Int("delegated_subject")
     allowed_actor = z3.Int("allowed_actor")
@@ -38,6 +42,10 @@ class DelegationModel:
             self.actor_has_hr_agent,
             self.actor_permissions == z3.If(self.actor_has_hr_agent, self.tool_permission, z3.BitVecVal(0, 4)),
             self.unexpired,
+            self.tool_is_hr_team_read,
+            self.resource_is_demo_team,
+            self.policy_response_valid,
+            self.policy_allows,
             self.delegated_subject == self.subject,
             self.caller_actor == self.allowed_actor,
             self.delegated_actor == self.caller_actor,

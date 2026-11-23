@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import ValidationError
 
+from app.authorization.delegated import OPAAuthorizer
 from app.authorization.dependencies import CurrentUser, require_role
 from app.identity.agent_routes import router as agent_router
 from app.identity.agent_tokens import AgentTokenService
@@ -28,6 +29,7 @@ from config.settings import Settings
 
 def create_app(
     settings: Settings | None = None, *, transport: httpx.BaseTransport | None = None,
+    opa_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -48,11 +50,15 @@ def create_app(
         app.state.login_attempts = ExpiringStore[LoginAttempt](LOGIN_TTL)
         app.state.sessions = ExpiringStore[BrowserSession](SESSION_TTL)
         app.state.handoffs = ExpiringStore[str](HANDOFF_TTL)
-        with httpx.Client(timeout=5.0, transport=transport, trust_env=False) as http:
+        with (
+            httpx.Client(timeout=5.0, transport=transport, trust_env=False) as http,
+            httpx.Client(timeout=2.0, transport=opa_transport, trust_env=False) as opa_http,
+        ):
             app.state.http = http
             app.state.verifier = TokenVerifier(app.state.settings, http)
             app.state.agent_tokens = AgentTokenService(app.state.settings, http, app.state.verifier)
             app.state.delegation = DelegationService(app.state.settings, http, app.state.verifier)
+            app.state.authorizer = OPAAuthorizer(opa_http, app.state.settings)
             async with mcp.session_manager.run():
                 yield
 

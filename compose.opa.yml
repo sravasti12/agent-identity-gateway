@@ -1,0 +1,20 @@
+name: agent-identity-gateway-policy
+
+services:
+  opa:
+    image: openpolicyagent/opa:1.12.2
+    command:
+      - run
+      - --server
+      - --addr=0.0.0.0:8181
+      - --authorization=basic
+      - --log-level=error
+      - --skip-version-check
+      - /policies/authorization.rego
+      - /policies/api_authorization.rego
+    ports:
+      - "127.0.0.1:8181:8181"
+    volumes:
+      - ./policies/authorization.rego:/policies/authorization.rego:ro
+      - ./policies/api_authorization.rego:/policies/api_authorization.rego:ro
+    read_only: true
