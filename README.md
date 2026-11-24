@@ -57,6 +57,22 @@ Under development. Features will be marked complete only after implementation an
 
 ## Continuous integration
 
+### Phase 7 operations and demonstration
+
+Run the host-based gateway with the Python 3.12 setup below. Use the separate loopback Compose services for Keycloak and OPA in an approved development environment. Keycloak stores its data in its named volume, OPA mounts its Rego files read-only, and the gateway writes `GATEWAY_DATABASE` on the host. Use one gateway worker with a persistent, private SQLite path. A restart preserves lifecycle and audit records and discards pending handoffs and browser sessions. SQLite operations share a process-local lock and write transactions. The audit verification described below depends on a trusted head.
+
+`GET /health/live` checks gateway responsiveness. `GET /health/ready` checks the SQLite audit head and Keycloak discovery issuer, plus OPA health when delegation is enabled. It returns `503` with boolean checks when a dependency fails. These are availability probes. Policy behavior, audit integrity, and login acceptance are verified separately.
+
+For a reproducible local demo, install the development requirements, set `OPA_TEST_BINARY` to the OPA 1.12.2 executable, and run:
+
+```powershell
+python -m pytest -q tests/unit/test_delegation.py -k 'mcp_runtime_uses_real_opa_policy or successful_tool_writes_correlated or gateway_restart or declined_consent or mcp_audits_opa_transport_failure'
+```
+
+The fixtures complete browser login and check the delegation consent claim, mint a one-use handoff, then call `read_hr_team` with a separate workload bearer. The gateway validates the exchange output, evaluates access to `hr_team/demo-team`, and records the policy decision and MCP result under one audit correlation ID. The real OPA test exercises both allow and deny. Keycloak and the workload credentials are synthetic. The restart case checks persisted suspension and audit integrity.
+
+For separately approved live acceptance, follow the Phase 3 recovery prerequisites below. Verify confidential clients, service-account role and audience mapping, the delegation scopes and `may_act` mappings, consent and FGAP permission for the intended user and agent, and active local HR grants before enabling delegation. Sign in via `/auth/login?delegate=true`, consent, claim the handoff with same-origin `POST /auth/delegation`, then invoke `read_hr_team` through `/mcp` with the workload bearer. Compare the subject, actor, and audience in the result to the intended identities and inspect `/admin/audit` using a human administrator. Confirm the denial path with absent consent or an unauthorized request. Live acceptance remains open.
+
 ### Phase 6 security regression checks
 
 Two independent browser sessions receive distinct handoffs and each resolves its own human subject before and after the other handoff is consumed. Advancing the test clock to the first session's expiry leaves the second session valid. Session handles are bearer credentials, so these checks establish isolation with independent cookie jars. They do not establish resistance to a copied valid cookie.

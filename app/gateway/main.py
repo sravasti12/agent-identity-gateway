@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, closing
+from sqlite3 import Error as SQLiteError
 from typing import Annotated
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -64,6 +65,7 @@ def create_app(
             httpx.Client(timeout=2.0, transport=opa_transport, trust_env=False) as opa_http,
         ):
             app.state.http = http
+            app.state.opa_http = opa_http
             app.state.storage = storage
             app.state.lifecycle = Lifecycle(storage, app.state.settings.access_review_days, agent_provider)
             app.state.verifier = TokenVerifier(app.state.settings, http)
@@ -101,6 +103,40 @@ def create_app(
     @app.get("/auth/me")
     def me(user: CurrentUser) -> User:
         return user
+
+    @app.get("/health/live", include_in_schema=False)
+    def live() -> dict[str, str]:
+        return {"status": "alive"}
+
+    @app.get("/health/ready", include_in_schema=False)
+    def ready() -> JSONResponse:
+        state = app.state
+        issuer = state.settings.keycloak_issuer
+        checks = {"database": False, "identity_provider": False}
+        try:
+            with state.storage.lock:
+                checks["database"] = state.storage.connection.execute(
+                    "SELECT 1 FROM audit_head WHERE singleton=1"
+                ).fetchone() is not None
+        except SQLiteError:
+            pass
+        try:
+            response = state.http.get(f"{issuer.rstrip('/')}/.well-known/openid-configuration", timeout=2.0)
+            metadata = response.json() if response.status_code == 200 else None
+            checks["identity_provider"] = isinstance(metadata, dict) and metadata.get("issuer") == issuer
+        except (httpx.HTTPError, ValueError):
+            pass
+        if state.settings.delegation_enabled:
+            checks["policy_engine"] = False
+            try:
+                checks["policy_engine"] = state.opa_http.get(
+                    f"{state.settings.opa_url}/health?bundles", timeout=2.0,
+                ).status_code == 200
+            except httpx.HTTPError:
+                pass
+        available = all(checks.values())
+        return JSONResponse({"status": "ready" if available else "unavailable", "checks": checks},
+                            status_code=200 if available else 503)
 
     @app.get("/hr/team")
     def hr_team(user: Annotated[User, Depends(require_role("hr_manager"))]) -> User:

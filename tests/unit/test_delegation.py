@@ -683,6 +683,65 @@ def test_mcp_runtime_uses_real_opa_policy(settings, provider, opa_server):
         assert len(provider.exchanges) == 2
 
 
+@pytest.mark.parametrize("unavailable", [None, "identity_provider", "policy_engine", "database"])
+def test_health_separates_liveness_from_dependency_readiness(settings, unavailable):
+    calls = []
+
+    def identity(request):
+        assert request.url.path.endswith("/.well-known/openid-configuration")
+        calls.append("identity_provider")
+        if unavailable == "identity_provider":
+            raise httpx.ConnectError("private fixture diagnostic", request=request)
+        return httpx.Response(200, json={"issuer": settings.keycloak_issuer})
+
+    def policy(request):
+        assert request.url.path == "/health"
+        calls.append("policy_engine")
+        return httpx.Response(503 if unavailable == "policy_engine" else 200)
+
+    with TestClient(create_app(settings, transport=httpx.MockTransport(identity),
+                               opa_transport=httpx.MockTransport(policy))) as client:
+        if unavailable == "database":
+            with client.app.state.storage.transaction() as db:
+                db.execute("DELETE FROM audit_head")
+        assert client.get("/health/live").json() == {"status": "alive"}
+        assert not calls
+        result = client.get("/health/ready")
+        assert result.status_code == (503 if unavailable else 200)
+        assert result.json() == {
+            "status": "unavailable" if unavailable else "ready",
+            "checks": {name: name != unavailable for name in ("database", "identity_provider", "policy_engine")},
+        }
+
+
+def test_gateway_restart_preserves_revocation_and_audit(settings, provider, tmp_path):
+    settings.gateway_database = str(tmp_path / "gateway.sqlite3")
+    def start():
+        app = create_app(settings, transport=httpx.MockTransport(provider.respond), opa_transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json={"result": {"allow": True}}),
+        ))
+        return TestClient(app, base_url="https://gateway.test", follow_redirects=False)
+
+    with start() as client:
+        seed_agent(client)
+        actor = provider.actor()
+        assert not tool(client, handoff(client, provider), actor)["result"].get("isError")
+        pending = handoff(client, provider)
+        cookie = client.cookies[SESSION_COOKIE]
+        state = client.app.state
+        state.lifecycle.transition("fixture-agent", State.SUSPENDED, "incident", "fixture-admin", "fixture-correlation")
+        before = state.storage.verify()
+        assert before.valid and before.records_checked > 0
+    with start() as client:
+        app = client.app
+        assert app.state.storage.verify() == before
+        assert app.state.lifecycle.details("fixture-agent").status == State.SUSPENDED
+        assert app.state.handoffs.get(pending) is None
+        assert client.get("/auth/me", headers={"Cookie": f"{SESSION_COOKIE}={cookie}"}).status_code == 401
+        assert client.get("/auth/login?delegate=true").status_code == 403
+        assert app.state.storage.verify().valid
+
+
 def test_mcp_denies_missing_hr_authority_and_unknown_tool(gateway, provider):
     provider.human_claims["realm_access"] = {"roles": ["employee"]}
     provider.output_claims["realm_access"] = {"roles": ["employee"]}

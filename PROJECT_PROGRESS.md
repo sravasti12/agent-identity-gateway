@@ -198,6 +198,14 @@ Checks ran in the existing local Windows Python 3.12 environment. The GitHub-hos
 
 ## Engineering Decision Log
 
+### Phase 7 integration readiness
+
+Updated `app/gateway/main.py`, `tests/unit/test_delegation.py`, and the paired project documents. Added liveness and dependency readiness endpoints with bounded HTTP probes and sanitized results. Four health cases cover healthy operation and independent database, Keycloak, and OPA failures. A restart case uses fresh app instances and one disposable SQLite file to verify durable suspension and audit integrity, plus loss of process-local sessions and handoffs. It reuses the mocked identity provider and MCP workflow. The existing real OPA allow/deny case and correlated audit case continue to run.
+
+Executed `python -m pytest -q` with OPA 1.12.2. Final result was 194 passed, zero skipped, and one existing TestClient deprecation warning. The first restart test reused a one-shot MCP session manager and failed. The corrected test creates a new app per startup, as a process restart does. `opa check --strict policies/`, all 22 Rego tests, CI Ruff, explicit-package-bases Mypy, compilation, `pip check`, and `git diff --check` passed. Both Compose files passed `docker compose --env-file .env.example -f <file> config --quiet` with warnings about access to the local Docker CLI config. Containers were not started. CI workflow and Compose were preserved.
+
+Phase 7 remains open for approved live Keycloak acceptance and runtime Compose validation. Continue with these checks before starting the next phase.
+
 ### Phase 6 defensive regression coverage
 
 Added two tests using the existing signed-token provider, login and handoff helpers, registry, and MCP fixture. Separate cookie jars preserve each human subject and handoff through consumption and staggered expiry. A registered workload with distinct client and service-account claims and no HR grant receives an audited MCP denial before exchange or tool execution. The configured workload still completes the authorized operation. The existing wrong-client and wrong-subject cases cover claim mismatch. Phase 6 remains open because bearer cookies are valid by possession and the gateway supports only one configured MCP agent. The tests do not establish rejection of a copied valid session handle or isolation between two simultaneously configured MCP agents.
