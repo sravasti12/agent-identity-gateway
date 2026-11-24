@@ -59,6 +59,10 @@ Under development. Features will be marked complete only after implementation an
 
 ### Phase 6 security regression checks
 
+Two independent browser sessions receive distinct handoffs and each resolves its own human subject before and after the other handoff is consumed. Advancing the test clock to the first session's expiry leaves the second session valid. Session handles are bearer credentials, so these checks establish isolation with independent cookie jars. They do not establish resistance to a copied valid cookie.
+
+The MCP test registers a second synthetic workload with no HR grant. Its bearer is denied before exchange or tool execution, and the configured HR workload can still use its own handoff. The deployment supports one configured MCP workload client, so simultaneous authorization of independently configured agents remains outside the verified runtime behavior. Reproduce both tests with `python -m pytest -q tests/unit/test_delegation.py -k 'independent_browser_sessions or other_registered_agent'`. Latest local verification passed 189 Python tests and 22 Rego tests. Phase 6 remains open for the stronger isolation requirements.
+
 The agent diagnostic and MCP reject a valid human bearer. The intended agent can still use the same handoff after that denial. Mock-provider rotation tests verify that a pending request leaves the old bearer usable, confirmed rotation rejects tokens issued at or before the cutoff, and a later bearer can execute with a fresh handoff. Applying a rotation invalidates existing handoffs even if the provider fails. A provider failure leaves the prior credential usable with a fresh handoff. These tests use synthetic tokens and do not validate live provider revocation.
 
 Run `python -m pytest -q tests/unit/test_delegation.py -k 'human_bearer_is_rejected or mock_rotation_controls'` to reproduce these cases. Local verification passed 187 Python tests and 22 Rego tests. Phase 6 remains open for independent human and agent isolation coverage. Browser session handles are bearer credentials, and the MCP route uses one configured workload client.

@@ -2,6 +2,7 @@ import logging
 import os
 import socket
 import subprocess
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic, sleep, time
@@ -27,7 +28,7 @@ from app.identity.delegation import (
     InvalidExchangeResponse,
 )
 from app.identity.lifecycle_models import HR_GRANTS, Registration, State
-from app.identity.sessions import HANDOFF_TTL, SESSION_COOKIE
+from app.identity.sessions import HANDOFF_TTL, SESSION_COOKIE, SESSION_TTL
 from app.identity.tokens import (
     InvalidToken,
     KeycloakUnavailable,
@@ -112,7 +113,8 @@ class Provider:
         form = {key: value[0] for key, value in parse_qs(request.content.decode()).items()}
         if form["grant_type"] == "authorization_code":
             return httpx.Response(200, json={
-                "id_token": self.sign(typ="ID", aud=HUMAN, nonce=self.nonce),
+                "id_token": self.sign(typ="ID", aud=HUMAN, nonce=self.nonce,
+                                      sub=self.human_claims.get("sub", SUBJECT)),
                 "access_token": self.human(),
             })
         self.exchanges.append(form)
@@ -318,6 +320,54 @@ def tool(gateway, code, token=None, name="read_hr_team"):
     })
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_independent_browser_sessions_keep_handoffs_and_expiry_separate(gateway, provider, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.identity.sessions.monotonic", lambda: clock[0])
+    other_subject = "second-human-subject"
+    with closing(TestClient(gateway.app, base_url="https://gateway.test", follow_redirects=False)) as other:
+        first = handoff(gateway, provider)
+        clock[0] += 1
+        provider.human_claims["sub"] = other_subject
+        second = handoff(other, provider)
+        assert gateway.cookies[SESSION_COOKIE] != other.cookies[SESSION_COOKIE]
+        assert first != second
+        origin = {"Origin": "https://gateway.test"}
+        assert gateway.post("/auth/delegation", headers=origin).json()["handoff"] == first
+        assert other.post("/auth/delegation", headers=origin).json()["handoff"] == second
+        assert gateway.get("/auth/me").json()["subject"] == SUBJECT
+        assert other.get("/auth/me").json()["subject"] == other_subject
+        bearer = provider.actor()
+        assert tool(gateway, first, bearer)["result"]["structuredContent"]["subject"] == SUBJECT
+        provider.output_claims["sub"] = other_subject
+        assert tool(other, second, bearer)["result"]["structuredContent"]["subject"] == other_subject
+        clock[0] += SESSION_TTL - 1
+        assert gateway.get("/auth/me").status_code == 401
+        assert other.get("/auth/me").json()["subject"] == other_subject
+
+
+def test_other_registered_agent_cannot_use_configured_agents_handoff(gateway, provider, monkeypatch):
+    lifecycle = gateway.app.state.lifecycle
+    other_client = "second-workload"
+    lifecycle.register(
+        Registration(id="second-agent", client_id=other_client, display_name="Second agent"),
+        "fixture-admin", "fixture-correlation",
+    )
+    code = handoff(gateway, provider)
+    other_bearer = provider.actor(azp=other_client, sub="second-workload-subject",
+                                  preferred_username=f"service-account-{other_client}")
+
+    def reject_execution(_identity):
+        pytest.fail("Tool executed for a different workload client")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
+        assert tool(gateway, code, other_bearer)["result"]["isError"]
+    assert not provider.exchanges
+    denial, = gateway.app.state.storage.events(20, 0, "mcp_invocation", None, "deny")
+    assert denial.reason_code == "authorization"
+    assert tool(gateway, code, provider.actor())["result"]["structuredContent"]["actor"] == ACTOR_SUBJECT
 
 
 def test_mcp_checks_bearer_and_consumes_handoff_once(gateway, provider):
