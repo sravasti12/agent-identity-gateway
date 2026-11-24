@@ -178,7 +178,7 @@ New files are `app/audit/store.py`, `app/audit/verify.py`, `app/identity/lifecyc
 | Mypy across app, config and verification | Passed across 17 source files. |
 | Compile checks, `pip check`, and `git diff --check` | Passed. |
 
-Local acceptance covers registry durability, verified human administration, lifecycle revocation before MCP execution, mock provider workflows, review decisions, audit pagination, and detection of modified, deleted or reordered records. The offline verifier opens an existing database read-only. Operational acceptance remains open for controlled administrator-role configuration, deployment storage and audit retention, and any separately approved live provider operations and recovery acceptance. No production rotation or revocation was attempted. Phase 6 remains untouched.
+Local acceptance covers registry durability, verified human administration, lifecycle revocation before MCP execution, mock provider workflows, review decisions, audit pagination, and detection of modified, deleted or reordered records. The offline verifier opens an existing database read-only. Operational acceptance remains open for controlled administrator-role configuration, deployment storage and audit retention, and any separately approved live provider operations and recovery acceptance. No production rotation or revocation was attempted.
 
 ## GitHub Actions CI
 
@@ -197,6 +197,12 @@ CI verifies the published SHA-256 and exact version of the official OPA 1.12.2 L
 Checks ran in the existing local Windows Python 3.12 environment. The GitHub-hosted Ubuntu job and its pip cache remain unverified until the workflow is pushed and runs on GitHub. CI does not change the pending live acceptance criteria for earlier phases.
 
 ## Engineering Decision Log
+
+### Phase 6 audit integrity coverage
+
+Added six cases in `tests/unit/test_lifecycle.py` for indexed decision drift, broken hash links, changed head sequence, changed head hash, missing head, and duplicate records. The verifier rejected each inconsistent fixture and reported the expected sequence. Existing pytest discovery includes the cases in CI. The existing Z3 model already covers actor validity, lifecycle status, tool eligibility, delegation binding, and explicit OPA allow, so it was kept as-is. The audit chain still depends on a separately trusted checkpoint for detecting a rewrite of both records and the stored head.
+
+Local verification with OPA 1.12.2 passed 178 pytest cases with one existing Starlette TestClient deprecation warning and 22 Rego tests. Strict Rego validation, CI-selected Ruff rules, Mypy, compilation, `pip check`, and `git diff --check` passed. Phase 6 remains open. GitHub Actions has not run this change.
 
 | ID | Decision | Reason |
 |---|---|---|

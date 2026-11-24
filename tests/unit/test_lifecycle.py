@@ -215,6 +215,29 @@ def test_audit_only_retains_safe_identity_identifiers_and_provides_pagination(st
     assert storage.verify().valid
 
 
+@pytest.mark.parametrize(("alteration", "expected_sequence"), [
+    ("UPDATE audit_events SET decision='deny' WHERE sequence=2", 2),
+    ("UPDATE audit_events SET previous_hash='invalid' WHERE sequence=2", 2),
+    ("UPDATE audit_head SET sequence=1 WHERE singleton=1", 3),
+    ("UPDATE audit_head SET event_hash='invalid' WHERE singleton=1", 3),
+    ("DELETE FROM audit_head WHERE singleton=1", 3),
+    ("INSERT INTO audit_events SELECT 3, document, previous_hash, event_hash, "
+     "event_type, agent, decision FROM audit_events WHERE sequence=2", 3),
+], ids=["indexed-decision", "previous-hash", "head-sequence", "head-hash", "missing-head", "duplicate"])
+def test_audit_integrity_reports_first_inconsistent_sequence(storage, alteration, expected_sequence):
+    for _ in range(2):
+        storage.audit("human_auth", "callback", "success", "authenticated", "corr")
+    assert storage.verify().valid
+
+    with storage.transaction() as db:
+        db.execute(alteration)
+
+    result = storage.verify()
+    assert not result.valid
+    assert result.failed_sequence == expected_sequence
+    assert result.records_checked == expected_sequence - 1
+
+
 def test_offline_audit_verification_opens_existing_database_read_only(storage, tmp_path):
     storage.audit("human_auth", "authenticate", "success", "authenticated", "correlation")
     path = tmp_path / "registry.sqlite3"
