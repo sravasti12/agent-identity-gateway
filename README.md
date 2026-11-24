@@ -57,13 +57,15 @@ Under development. Features will be marked complete only after implementation an
 
 ## Continuous integration
 
-### Phase 6 audit integrity regression checks
+### Phase 6 security regression checks
+
+The MCP tests simulate an unavailable OPA connection and a read timeout using a mock transport. Both must deny the tool call before execution, record correlated policy and invocation denials, and keep the bearer, handoff, and private diagnostic out of the response, logs, and denial records. Run `python -m pytest -q tests/unit/test_delegation.py -k opa_transport_failure` to reproduce these cases.
 
 The SQLite tests use disposable fixtures to check that the verifier rejects inconsistent indexed decisions, broken hash links, altered or missing chain-head metadata, and duplicate records. They assert the first inconsistent sequence and the number of verified records. Existing tests cover record modification, deletion, and reordering. These checks run in the existing CI pytest job.
 
 The hash chain detects inconsistencies relative to the stored head. Anyone who can rewrite both the chain and its head can recompute the hashes. Detecting that requires a separately trusted checkpoint. The existing Z3 checks establish properties of the authorization model. Runtime tests exercise the implementation independently.
 
-Run the focused checks with `python -m pytest -q tests/unit/test_lifecycle.py tests/unit/test_delegation_invariants.py`. For the full suite, set `OPA_TEST_BINARY` to the OPA 1.12.2 executable and run `python -m pytest -q`, `opa check --strict policies/`, and `opa test policies/ -v`. Local verification recorded 178 Python tests and 22 Rego tests passing. Phase 6 remains open.
+Run the focused checks with `python -m pytest -q tests/unit/test_lifecycle.py tests/unit/test_delegation_invariants.py`. For the full suite, set `OPA_TEST_BINARY` to the OPA 1.12.2 executable and run `python -m pytest -q`, `opa check --strict policies/`, and `opa test policies/ -v`. Local verification recorded 180 Python tests and 22 Rego tests passing. Phase 6 remains open.
 
 The [CI workflow](.github/workflows/ci.yml) runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. Its Ubuntu job installs Python 3.12 dependencies from `requirements-dev.txt` with pip caching and checks the checksum and version of the official OPA 1.12.2 binary.
 

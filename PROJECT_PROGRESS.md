@@ -198,11 +198,13 @@ Checks ran in the existing local Windows Python 3.12 environment. The GitHub-hos
 
 ## Engineering Decision Log
 
-### Phase 6 audit integrity coverage
+### Phase 6 defensive regression coverage
+
+Added MCP runtime regression cases for OPA connection failure and read timeout in `tests/unit/test_delegation.py`. They verify tool non-execution, correlated denial records, and redaction across the response, captured logs, and those records. CI discovers both cases through the existing pytest job. No dependency or runtime changes were needed.
 
 Added six cases in `tests/unit/test_lifecycle.py` for indexed decision drift, broken hash links, changed head sequence, changed head hash, missing head, and duplicate records. The verifier rejected each inconsistent fixture and reported the expected sequence. Existing pytest discovery includes the cases in CI. The existing Z3 model already covers actor validity, lifecycle status, tool eligibility, delegation binding, and explicit OPA allow, so it was kept as-is. The audit chain still depends on a separately trusted checkpoint for detecting a rewrite of both records and the stored head.
 
-Local verification with OPA 1.12.2 passed 178 pytest cases with one existing Starlette TestClient deprecation warning and 22 Rego tests. Strict Rego validation, CI-selected Ruff rules, Mypy, compilation, `pip check`, and `git diff --check` passed. Phase 6 remains open. GitHub Actions has not run this change.
+Local verification with OPA 1.12.2 passed 180 pytest cases with one existing Starlette TestClient deprecation warning and 22 Rego tests. Strict Rego validation, CI-selected Ruff rules, Mypy, compilation, `pip check`, and `git diff --check` passed. Phase 6 remains open. GitHub Actions has not run this change.
 
 | ID | Decision | Reason |
 |---|---|---|

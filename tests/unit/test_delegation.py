@@ -457,6 +457,40 @@ def test_mcp_never_executes_tool_without_explicit_opa_allow(
     assert len(provider.exchanges) == 1
 
 
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ReadTimeout], ids=["offline", "timeout"])
+def test_mcp_audits_opa_transport_failure_without_executing_tool(
+    settings, provider, failure, monkeypatch, caplog,
+):
+    diagnostic = "synthetic private policy diagnostic"
+
+    def unavailable(request):
+        assert request.url.path == DECISION_PATH
+        raise failure(diagnostic, request=request)
+
+    def reject_execution(_identity):
+        pytest.fail("Tool executed after a policy transport failure")
+
+    monkeypatch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
+    with TestClient(
+        create_app(settings, transport=httpx.MockTransport(provider.respond),
+                   opa_transport=httpx.MockTransport(unavailable)),
+        base_url="https://gateway.test", follow_redirects=False,
+    ) as gateway:
+        seed_agent(gateway)
+        code = handoff(gateway, provider)
+        bearer = provider.actor()
+        response = tool(gateway, code, bearer)
+        assert response["result"]["isError"]
+        storage = gateway.app.state.storage
+        invocation, = storage.events(20, 0, "mcp_invocation", "fixture-agent", None)
+        policy, = storage.events(20, 0, "opa_decision", "fixture-agent", None)
+        assert (invocation.decision, invocation.reason_code) == ("deny", "policy_unavailable")
+        assert (policy.decision, policy.reason_code) == ("deny", "unavailable_or_invalid")
+        assert invocation.correlation_id == policy.correlation_id
+        assert all(value not in str((response, caplog.text, invocation, policy))
+                   for value in (diagnostic, code, bearer))
+
+
 def test_mcp_runtime_uses_real_opa_policy(settings, provider, opa_server):
     settings.opa_url = opa_server
     with TestClient(
