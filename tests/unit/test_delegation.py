@@ -25,6 +25,7 @@ from app.identity.delegation import (
     InvalidExchangeResponse,
 )
 from app.identity.lifecycle_models import HR_GRANTS, Registration, State
+from app.identity.sessions import HANDOFF_TTL, SESSION_COOKIE
 from app.identity.tokens import (
     InvalidToken,
     KeycloakUnavailable,
@@ -337,6 +338,44 @@ def admin_headers(provider):
     return {"Authorization": f"Bearer {provider.human(realm_access={'roles': ['gateway_admin']})}"}
 
 
+@pytest.mark.parametrize("cookie", [None, "synthetic-unknown-session"], ids=["missing", "unknown"])
+def test_handoff_claim_requires_a_live_browser_session(gateway, provider, cookie, caplog):
+    headers = {"Origin": "https://gateway.test"}
+    if cookie is not None:
+        headers["Cookie"] = f"{SESSION_COOKIE}={cookie}"
+    response = gateway.post("/auth/delegation", headers=headers)
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Browser session required"}
+    event, = gateway.app.state.storage.events(20, 0, "delegation_rejected", None, None)
+    assert (event.decision, event.reason_code) == ("deny", "session_missing")
+    assert event.correlation_id == response.headers["X-Correlation-ID"]
+    assert not provider.exchanges
+    if cookie is not None:
+        assert cookie not in str((response.text, caplog.text, event))
+    assert handoff(gateway, provider)
+
+
+def test_mcp_rejects_handoff_at_expiry(gateway, provider, monkeypatch, caplog):
+    clock = [100.0]
+    monkeypatch.setattr("app.identity.sessions.monotonic", lambda: clock[0])
+    code = handoff(gateway, provider)
+    bearer = provider.actor()
+    clock[0] += HANDOFF_TTL
+
+    def reject_execution(_identity):
+        pytest.fail("Tool executed with an expired handoff")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
+        response = tool(gateway, code, bearer)
+    assert response["result"]["isError"]
+    assert not provider.exchanges
+    event, = gateway.app.state.storage.events(20, 0, "mcp_invocation", None, None)
+    assert (event.decision, event.reason_code) == ("deny", "authorization")
+    assert all(value not in str((response, caplog.text, event)) for value in (code, bearer))
+    assert not tool(gateway, handoff(gateway, provider), bearer)["result"].get("isError")
+
+
 def test_governance_http_onboarding_and_audit_require_verified_admin(gateway, provider):
     body = {"id": "new-agent", "client_id": "new-client", "display_name": "New agent"}
     ordinary = {"Authorization": f"Bearer {provider.human()}"}
@@ -386,24 +425,29 @@ def test_inactive_agent_cannot_use_pending_handoff_or_administer_itself(gateway,
     assert not provider.exchanges
 
 
-def test_revocation_between_opa_and_local_execution_prevents_invocation(gateway, provider, monkeypatch):
+@pytest.mark.parametrize("target", [State.SUSPENDED, State.DEPROVISIONED])
+def test_revocation_between_opa_and_local_execution_prevents_invocation(gateway, provider, monkeypatch, target, caplog):
     code = handoff(gateway, provider)
     state = gateway.app.state
     authorize = state.authorizer.authorize_team_read
 
     def allow_then_revoke(identity, agent):
         authorize(identity, agent)
-        state.lifecycle.transition(agent.id, State.DEPROVISIONED, "incident", "fixture-admin", "fixture-correlation")
+        state.lifecycle.transition(agent.id, target, "incident", "fixture-admin", "fixture-correlation")
 
     def reject_execution(_identity):
         pytest.fail("Tool executed after local deprovisioning")
 
     monkeypatch.setattr(state.authorizer, "authorize_team_read", allow_then_revoke)
     monkeypatch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
-    assert tool(gateway, code, provider.actor())["result"]["isError"]
+    bearer = provider.actor()
+    response = tool(gateway, code, bearer)
+    assert response["result"]["isError"]
     assert len(provider.exchanges) == 1
     assert state.storage.events(20, 0, "opa_decision", "fixture-agent", "allow")
     assert not state.storage.events(20, 0, "mcp_invocation", "fixture-agent", "allow")
+    event, = state.storage.events(20, 0, "mcp_invocation", "fixture-agent", "deny")
+    assert all(value not in str((response, caplog.text, event)) for value in (code, bearer))
 
 
 def test_workload_cannot_decide_reviews_and_approved_revocation_changes_permissions(gateway, provider):
