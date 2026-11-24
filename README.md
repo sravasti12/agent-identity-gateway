@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/sravasti12/agent-identity-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sravasti12/agent-identity-gateway/actions/workflows/ci.yml)
 
-A security platform for managing authentication, authorization, and lifecycle governance of enterprise AI agents.
+A Python gateway that gives an AI workload its own identity, checks what a human delegated to it, and records why a protected tool call was allowed or denied.
 
 ## Problem Statement
 
 AI agents increasingly interact with enterprise systems, databases, and business tools. Shared API keys and long-lived credentials introduce risks such as excessive permissions, impersonation, unauthorized access, and poor auditability.
 
-Agent Identity Gateway addresses these challenges through independent agent identities, delegated authorization, short-lived credentials, and centralized policy enforcement.
+An ordinary shared API key identifies whoever holds the key. It cannot distinguish the human authorizing a request from the workload executing it, or express a user-specific grant for one tool and resource. The gateway verifies both identities, restricts delegated tokens by audience, scope and lifetime, and requires a separate policy decision before returning a tool result.
 
 ## Core Objectives
 
@@ -37,11 +37,43 @@ Agent Identity Gateway addresses these challenges through independent agent iden
 | Z3 | Formal verification |
 | Docker Compose | Infrastructure |
 | pytest | Testing |
-| GitHub Actions | CI/CD |
+| SQLite | Lifecycle registry and hash-chain audit |
+| GitHub Actions | Continuous integration |
 
 ## Architecture
 
-See [Architecture Documentation](docs/ARCHITECTURE.md).
+```mermaid
+flowchart LR
+    Human[Human browser] --> IdP[Keycloak]
+    Agent[Workload agent] --> IdP
+    Human -->|Browser session and consent| Gateway[FastAPI gateway]
+    Agent -->|Workload bearer and handoff| Gateway
+    Gateway <-->|Delegated token exchange| IdP
+    Gateway --> MCP[Protected MCP tool]
+    MCP <-->|Default-deny decision| OPA[OPA / Rego]
+    MCP -->|Lifecycle check and correlated audit| DB[SQLite]
+```
+
+See the [architecture](docs/ARCHITECTURE.md) for trust boundaries and the [threat model](docs/THREAT_MODEL.md) for residual risks.
+
+## Run the demo on Windows
+
+Install Python 3.12 and the official OPA 1.12.2 Windows executable. From the repository root, run the following in PowerShell. The test fixture starts its own local OPA server, supplies synthetic Keycloak responses, and exercises login, consent, workload authentication, the one-use handoff, policy allow and deny, and correlated audit records. The demo needs no Docker, `.env`, or Keycloak credentials.
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+$env:OPA_TEST_BINARY = (Resolve-Path 'C:\path\to\opa.exe').Path
+& $env:OPA_TEST_BINARY version
+.venv\Scripts\python.exe -m pytest -q tests/unit/test_delegation.py -k 'mcp_runtime_uses_real_opa_policy or successful_tool_writes_correlated or mcp_checks_bearer_and_consumes_handoff_once or declined_consent'
+.venv\Scripts\python.exe -m pytest -q
+& $env:OPA_TEST_BINARY check --strict policies/
+& $env:OPA_TEST_BINARY test policies/ -v
+```
+
+For an isolated development deployment, install Docker Desktop with Linux containers and verify `docker compose version`. Follow the [Keycloak setup](#phase-1-local-setup) and [OPA startup](#run-opa-and-verify) below. Copy `.env.example` only when starting without an existing `.env`. Enter credentials locally and keep them out of Git and logs. Use the same host spelling in the issuer and registered callback. The Compose files publish Keycloak and OPA only on loopback. Uvicorn runs separately on the host.
+
+If readiness returns `503`, check the returned dependency booleans. Verify the issuer and discovery response for `identity_provider`, the OPA process and its policy mounts for `policy_engine`, and the private SQLite path and directory permissions for `database`. An OPA test skip usually means `OPA_TEST_BINARY` is missing or points to the wrong executable.
 
 ## Development Progress
 
@@ -53,7 +85,7 @@ Initially developed as a local security demonstration environment. Production de
 
 ## Development Status
 
-Under development. Features will be marked complete only after implementation and verification.
+Proposed portfolio release `v1.0.0`. Local verification passed 195 Python tests and 22 Rego tests. Live token exchange and isolated container acceptance remain open. Use one gateway worker and a private persistent SQLite path. Plan restricted filesystem access, backups and retention before deployment. Retain the audit head and any external checkpoints with the evidence they protect.
 
 ## Continuous integration
 

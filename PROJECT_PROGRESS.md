@@ -27,6 +27,7 @@ Build a security gateway that provides independent identities, delegated access,
 | 6 | Defensive security regression testing | Tested locally. Copied-cookie and multi-agent isolation limits remain. |
 | 7 | Integration and deployment readiness | Host runtime verified. Isolated container and live identity acceptance remain open. |
 | 8 | Security assurance and final validation | Local assurance passed. Live acceptance remains open. |
+| 9 | Final release preparation | Portfolio documentation and local checks verified. Proposed `v1.0.0` remains untagged. |
 
 ## Phase 0 — Foundation
 
@@ -197,6 +198,14 @@ CI verifies the published SHA-256 and exact version of the official OPA 1.12.2 L
 Checks ran in the existing local Windows Python 3.12 environment. The GitHub-hosted Ubuntu job and its pip cache remain unverified until the workflow is pushed and runs on GitHub. CI does not change the pending live acceptance criteria for earlier phases.
 
 ## Engineering Decision Log
+
+### Phase 9 release preparation
+
+Updated `README.md`, `docs/ARCHITECTURE.md`, and this tracker. Reused the signed-token and real OPA fixtures for the default demonstration. The Mermaid diagram reflects the current subject, actor, token exchange, policy and lifecycle boundaries. No production code, dependency or workflow changes were needed.
+
+Local verification with OPA 1.12.2 passed `python -m pytest -q` (195 passed, zero skipped, one existing Starlette TestClient warning), `opa check --strict policies/`, and `opa test policies/` (22 passed). CI Ruff rules, explicit-package-bases Mypy (17 files), compilation, `pip check`, `actionlint` 1.7.12, and `git diff --check` passed. GitHub main was verified at Phase 8 commit `1443138`, with a [successful hosted CI run](https://github.com/sravasti12/agent-identity-gateway/actions/runs/45372364816). The Phase 9 documentation edits have yet to run on GitHub Actions.
+
+The proposed `v1.0.0` is suitable for a portfolio demonstration once the documentation commit passes hosted CI. No matching remote tag was found. Production readiness and live exchange remain unverified. See the threat model for bearer cookie, single-worker, policy trust and audit anchoring constraints. The working tree included pre-existing `docker-compose.yml` and `app/identity/agent_tokens.py` edits. Neither was changed or staged for this release.
 
 ### Phase 8 security assurance
 
