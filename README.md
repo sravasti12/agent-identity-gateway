@@ -57,6 +57,10 @@ Under development. Features will be marked complete only after implementation an
 
 ## Continuous integration
 
+### Phase 8 security assurance
+
+The [threat model](docs/THREAT_MODEL.md) documents trust boundaries, defensive verification, and residual deployment risks. The audit-write regression verifies that MCP stops before tool execution and rolls back access metadata when the final invocation record cannot be written. Run it with `python -m pytest -q tests/unit/test_delegation.py -k audit_write_failure`. Local verification passed 195 Python and 22 Rego tests. Live Keycloak acceptance and deployment verification remain open.
+
 ### Phase 7 operations and demonstration
 
 Runtime acceptance used a host gateway and standalone OPA 1.12.2 on temporary loopback ports with a disposable SQLite database. Recovery Keycloak on port 8081 supplied public discovery and JWKS. Liveness and readiness returned `200`. After stopping the disposable OPA process, readiness returned `503` with only the policy check failing, and liveness stayed `200`. The gateway shut down gracefully. Compose startup remains pending because the current Keycloak service targets the existing container name, port and project volume. Both Compose files passed configuration validation with `.env.example`.

@@ -24,9 +24,9 @@ Build a security gateway that provides independent identities, delegated access,
 | 3 | Secure token exchange | Backend implemented and mock-tested. Stage 2A full readback and live exchange pending. |
 | 4 | Centralized authorization with OPA and Rego | Implemented and tested with real OPA and mocked Keycloak. Live acceptance pending. |
 | 5 | Audit logging and non-human identity lifecycle | Implemented and locally verified. Operational acceptance pending. |
-| 6 | Audit and lifecycle automation | Not started |
-| 7 | Security testing and Z3 | Not started |
-| 8 | Finalization and demonstration | Not started |
+| 6 | Defensive security regression testing | Tested locally. Copied-cookie and multi-agent isolation limits remain. |
+| 7 | Integration and deployment readiness | Host runtime verified. Isolated container and live identity acceptance remain open. |
+| 8 | Security assurance and final validation | Local assurance passed. Live acceptance remains open. |
 
 ## Phase 0 — Foundation
 
@@ -197,6 +197,14 @@ CI verifies the published SHA-256 and exact version of the official OPA 1.12.2 L
 Checks ran in the existing local Windows Python 3.12 environment. The GitHub-hosted Ubuntu job and its pip cache remain unverified until the workflow is pushed and runs on GitHub. CI does not change the pending live acceptance criteria for earlier phases.
 
 ## Engineering Decision Log
+
+### Phase 8 security assurance
+
+Added `docs/THREAT_MODEL.md` and an audit-write failure test in `tests/unit/test_delegation.py`. Updated README and the phase tracker. Reused the existing signed-token, MCP, OPA, rotation, SQLite integrity, and Z3 tests. The new test verifies that failure to persist the invocation record prevents tool execution and rolls back the access timestamp. Existing audit evidence remains internally consistent. No runtime changes were needed.
+
+With `OPA_TEST_BINARY` set to OPA 1.12.2, `python -m pytest -q` passed 195 tests with zero skips and one existing TestClient deprecation warning. `opa check --strict policies/`, `opa test policies/` (22 passed), CI Ruff, explicit-package-bases Mypy (17 source files), compileall, `pip check`, and `git diff --check` passed. The existing CI job discovers the new test. No hosted run or live Keycloak exchange was performed for this increment.
+
+Phase 8 remains open for approved live mapper, client, permission and exchange validation, plus the outstanding deployment checks. Possession of a valid browser cookie carries session authority, audit integrity depends on the trusted head, and current deployment assumes a single gateway worker and trusted OPA/Keycloak configuration. Resolve acceptance before starting Phase 9.
 
 ### Phase 7 integration readiness
 

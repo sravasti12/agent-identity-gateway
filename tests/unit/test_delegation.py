@@ -2,6 +2,7 @@ import logging
 import os
 import socket
 import subprocess
+from sqlite3 import OperationalError
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -598,6 +599,31 @@ def test_workload_cannot_decide_reviews_and_approved_revocation_changes_permissi
     applied = gateway.post(decision, headers=headers, json={"decision": "APPROVED"})
     assert applied.status_code == 200 and applied.json()["decision"] == "APPROVED"
     assert gateway.get("/auth/login?delegate=true").status_code == 403
+
+
+def test_mcp_audit_write_failure_rolls_back_access_and_prevents_tool(gateway, provider, monkeypatch):
+    state = gateway.app.state
+    original_audit = state.storage.audit
+    code = handoff(gateway, provider)
+    bearer = provider.actor()
+
+    def audit(event, *args, **kwargs):
+        if event == "mcp_invocation":
+            raise OperationalError("simulated audit storage unavailable")
+        return original_audit(event, *args, **kwargs)
+
+    def reject_execution(_identity):
+        pytest.fail("Tool executed without a durable invocation record")
+
+    monkeypatch.setattr(state.storage, "audit", audit)
+    monkeypatch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
+    response = tool(gateway, code, bearer)
+    assert response["result"]["isError"]
+    assert all(value not in str(response) for value in (code, bearer))
+    assert state.lifecycle.details("fixture-agent").last_access_at is None
+    assert not state.storage.events(20, 0, "mcp_invocation", None, None)
+    assert state.storage.events(20, 0, "opa_decision", "fixture-agent", "allow")
+    assert state.storage.verify().valid
 
 
 def test_successful_tool_writes_correlated_credential_free_audit(gateway, provider):
