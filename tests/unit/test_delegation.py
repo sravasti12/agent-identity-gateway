@@ -2,6 +2,7 @@ import logging
 import os
 import socket
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic, sleep, time
 from urllib.parse import parse_qs, urlsplit
@@ -11,6 +12,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from test_lifecycle import MockProvider
 
 from app.authorization.delegated import DECISION_PATH
 from app.gateway.main import create_app
@@ -338,6 +340,32 @@ def admin_headers(provider):
     return {"Authorization": f"Bearer {provider.human(realm_access={'roles': ['gateway_admin']})}"}
 
 
+def test_human_bearer_is_rejected_at_both_agent_boundaries(gateway, provider, monkeypatch, caplog):
+    code = handoff(gateway, provider)
+    bearer = provider.human()
+    diagnostic = gateway.get("/agent/me", headers={"Authorization": f"Bearer {bearer}"})
+    assert diagnostic.status_code == 403
+
+    def reject_execution(_identity):
+        pytest.fail("Tool executed with a human bearer")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
+        response = tool(gateway, code, bearer)
+    assert response["result"]["isError"]
+    assert not provider.exchanges
+    storage = gateway.app.state.storage
+    auth = storage.events(20, 0, "agent_auth", None, "failure")
+    assert any(event.reason_code == "wrong_identity" and
+               event.correlation_id == diagnostic.headers["X-Correlation-ID"] for event in auth)
+    denial, = storage.events(20, 0, "mcp_invocation", None, "deny")
+    assert denial.reason_code == "authorization"
+    assert any(event.correlation_id == denial.correlation_id for event in auth)
+    assert all(value not in str((diagnostic.text, response, caplog.text, auth, denial))
+               for value in (bearer, code))
+    assert not tool(gateway, code, provider.actor())["result"].get("isError")
+
+
 @pytest.mark.parametrize("cookie", [None, "synthetic-unknown-session"], ids=["missing", "unknown"])
 def test_handoff_claim_requires_a_live_browser_session(gateway, provider, cookie, caplog):
     headers = {"Origin": "https://gateway.test"}
@@ -353,6 +381,59 @@ def test_handoff_claim_requires_a_live_browser_session(gateway, provider, cookie
     if cookie is not None:
         assert cookie not in str((response.text, caplog.text, event))
     assert handoff(gateway, provider)
+
+
+@pytest.mark.parametrize("provider_fails", [False, True], ids=["confirmed", "failed"])
+def test_mock_rotation_controls_mcp_bearer_cutoff_and_handoff_generation(
+    gateway, provider, provider_fails, monkeypatch, caplog,
+):
+    cutoff = int(time()) - 10
+
+    class RotationClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(cutoff, tz or UTC)
+
+    monkeypatch.setattr("app.identity.lifecycle.datetime", RotationClock)
+    state = gateway.app.state
+    mock = MockProvider()
+    mock.fail_rotation = provider_fails
+    state.lifecycle.provider = mock
+    old = provider.actor(iat=cutoff - 1)
+    assert not tool(gateway, handoff(gateway, provider), old)["result"].get("isError")
+    rotation = state.lifecycle.request_rotation("fixture-agent", "fixture-admin", "rotation-correlation")
+    assert rotation.state == "PENDING" and not mock.rotations
+    assert not tool(gateway, handoff(gateway, provider), old)["result"].get("isError")
+    previous_handoff = handoff(gateway, provider)
+    result = state.lifecycle.apply_rotation("fixture-agent", rotation.id, "fixture-admin", "rotation-correlation")
+    assert result.state == ("FAILED" if provider_fails else "COMPLETED")
+    assert mock.rotations == [(CLIENT, rotation.id)]
+    accepted = old if provider_fails else provider.actor(iat=cutoff + 1)
+    attempts = [(previous_handoff, accepted)]
+    if not provider_fails:
+        attempts.append((handoff(gateway, provider), old))
+
+    def reject_execution(_identity):
+        pytest.fail("Tool executed with an invalidated handoff or stale bearer")
+
+    exchanges = len(provider.exchanges)
+    with monkeypatch.context() as patch:
+        patch.setattr("app.tools.mcp_server.team_read_result", reject_execution)
+        for code, bearer in attempts:
+            response = tool(gateway, code, bearer)
+            assert response["result"]["isError"]
+            assert all(value not in str((response, caplog.text)) for value in (code, bearer))
+    assert len(provider.exchanges) == exchanges
+    denials = state.storage.events(20, 0, "mcp_invocation", None, "deny")
+    assert len(denials) == len(attempts)
+    assert all(value.correlation_id for value in denials)
+    if not provider_fails:
+        assert any(value.reason_code == "stale_agent_token" for value in denials)
+    events = state.storage.events(100, 0, None, None, None)
+    assert all(value not in str((events, caplog.text)) for value in (
+        old, accepted, previous_handoff, "synthetic secret returned in provider diagnostic",
+    ))
+    assert not tool(gateway, handoff(gateway, provider), accepted)["result"].get("isError")
 
 
 def test_mcp_rejects_handoff_at_expiry(gateway, provider, monkeypatch, caplog):

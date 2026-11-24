@@ -59,6 +59,10 @@ Under development. Features will be marked complete only after implementation an
 
 ### Phase 6 security regression checks
 
+The agent diagnostic and MCP reject a valid human bearer. The intended agent can still use the same handoff after that denial. Mock-provider rotation tests verify that a pending request leaves the old bearer usable, confirmed rotation rejects tokens issued at or before the cutoff, and a later bearer can execute with a fresh handoff. Applying a rotation invalidates existing handoffs even if the provider fails. A provider failure leaves the prior credential usable with a fresh handoff. These tests use synthetic tokens and do not validate live provider revocation.
+
+Run `python -m pytest -q tests/unit/test_delegation.py -k 'human_bearer_is_rejected or mock_rotation_controls'` to reproduce these cases. Local verification passed 187 Python tests and 22 Rego tests. Phase 6 remains open for independent human and agent isolation coverage. Browser session handles are bearer credentials, and the MCP route uses one configured workload client.
+
 Delegation tests reject handoff claims with a missing or unknown browser session and reject a handoff at its expiry boundary. A fresh handoff still works. The tests also suspend an agent after OPA allows the request and verify that the final lifecycle check blocks tool execution. Denials are audited without exposing synthetic session handles, handoffs, or bearers. Run `python -m pytest -q tests/unit/test_delegation.py -k 'live_browser_session or handoff_at_expiry or revocation_between_opa'` to reproduce these checks.
 
 The MCP tests simulate an unavailable OPA connection and a read timeout using a mock transport. Both must deny the tool call before execution, record correlated policy and invocation denials, and keep the bearer, handoff, and private diagnostic out of the response, logs, and denial records. Run `python -m pytest -q tests/unit/test_delegation.py -k opa_transport_failure` to reproduce these cases.
