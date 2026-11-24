@@ -180,6 +180,22 @@ New files are `app/audit/store.py`, `app/audit/verify.py`, `app/identity/lifecyc
 
 Local acceptance covers registry durability, verified human administration, lifecycle revocation before MCP execution, mock provider workflows, review decisions, audit pagination, and detection of modified, deleted or reordered records. The offline verifier opens an existing database read-only. Operational acceptance remains open for controlled administrator-role configuration, deployment storage and audit retention, and any separately approved live provider operations and recovery acceptance. No production rotation or revocation was attempted. Phase 6 remains untouched.
 
+## GitHub Actions CI
+
+Added `.github/workflows/ci.yml` with one Ubuntu job for pushes to `main`, pull requests targeting `main`, and manual dispatch. The job uses read-only repository permissions, a 15-minute timeout, and Python 3.12. It installs `requirements-dev.txt` and caches pip downloads using both requirements files.
+
+CI verifies the published SHA-256 and exact version of the official OPA 1.12.2 Linux release binary, makes it available through `OPA_TEST_BINARY`, and runs the complete test suite. Keycloak is mocked. SQLite tests use memory or fresh temporary files. The only application source change organizes imports in `app/identity/agent_tokens.py`, clearing the existing Ruff finding without changing behavior.
+
+| Local check | Actual result |
+|---|---|
+| `actionlint` 1.7.12 on the workflow | Passed |
+| `opa check --strict policies/` and `opa test policies/ -v` | Strict validation passed, 22 of 22 Rego cases passed using OPA 1.12.2 |
+| `python -m pytest -q` with `OPA_TEST_BINARY` set | 172 passed, zero skipped, one existing TestClient/httpx deprecation warning |
+| Ruff with the CI selectors and with default selectors | Both passed |
+| Mypy, Python compilation, `pip check`, and `git diff --check` | Passed |
+
+Checks ran in the existing local Windows Python 3.12 environment. The GitHub-hosted Ubuntu job and its pip cache remain unverified until the workflow is pushed and runs on GitHub. CI does not change the pending live acceptance criteria for earlier phases.
+
 ## Engineering Decision Log
 
 | ID | Decision | Reason |

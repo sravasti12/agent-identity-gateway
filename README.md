@@ -1,5 +1,7 @@
 # Agent Identity Gateway
 
+[![CI](https://github.com/sravasti12/agent-identity-gateway/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sravasti12/agent-identity-gateway/actions/workflows/ci.yml)
+
 A security platform for managing authentication, authorization, and lifecycle governance of enterprise AI agents.
 
 ## Problem Statement
@@ -52,6 +54,12 @@ Initially developed as a local security demonstration environment. Production de
 ## Development Status
 
 Under development. Features will be marked complete only after implementation and verification.
+
+## Continuous integration
+
+The [CI workflow](.github/workflows/ci.yml) runs on pushes to `main`, pull requests targeting `main`, and manual dispatch. Its Ubuntu job installs Python 3.12 dependencies from `requirements-dev.txt` with pip caching and checks the checksum and version of the official OPA 1.12.2 binary.
+
+CI runs the full pytest suite, including lifecycle and audit integrity tests and the MCP integration against a real temporary OPA process. Tests use mocked Keycloak, in-memory SQLite, or fresh temporary database files. CI also runs strict Rego compilation, Rego tests, Ruff, Mypy, Python compilation, and dependency compatibility checks. The badge reflects GitHub-hosted runs after the workflow is pushed.
 
 
 ## Phase 1 local setup
